@@ -1,0 +1,18 @@
+# Entorno — NUNCA commitear valores reales (aquí vive tu llave de operador)
+.env
+.env.*
+!.env.example
+
+node_modules/
+dist/
+coverage/
+
+# SQLite del daemon
+*.db
+*.db-journal
+
+# Sistema / editor
+.DS_Store
+*.log
+.idea/
+.vscode/
