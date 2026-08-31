@@ -2,7 +2,7 @@
 
 El programa que liquida pagos en la red CoatiPay. Recibe autorizaciones
 **ERC-3009** firmadas por los pagadores, las presenta on-chain pagando el gas, y
-cobra el **0.7% de cada pago que liquida**, en USDC.
+cobra el **1.05% de cada pago que liquida**, en USDC.
 
 **Apache-2.0** · cualquiera puede correrlo · sin whitelist.
 
@@ -95,8 +95,8 @@ Debe responder `settler: running` y `watcher: synced`. Aparecerás en
 
 ## Cuánto ganas, y qué arriesgas
 
-De cada pago que liquidas te llevas el **0.7%** (el 70% de la comisión del
-protocolo, que es del 1.0%). En USDC y on-chain, en la misma transacción.
+De cada pago que liquidas te llevas el **1.05%** (el 70% de la comisión del
+protocolo, que es del 1.5%). En USDC y on-chain, en la misma transacción.
 
 Pagas el **gas** de cada liquidación. Por eso el daemon **rechaza pagos
 demasiado pequeños**: liquidar por debajo del coste sería perder dinero. Ese
