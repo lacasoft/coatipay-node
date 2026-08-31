@@ -11,7 +11,13 @@ En español o inglés, como prefieras. Incluye qué falla, cómo reproducirlo y 
 impacto le ves. Un reporte parcial es mejor que ninguno.
 
 - Acusamos recibo en **48 horas**.
-- Hay **recompensa** por hallazgos críticos, acordada caso por caso.
+- **Reconocimiento público** cuando el fix esté desplegado, y sitio en el hall
+  of fame de este documento.
+- **Recompensa en USDC** por hallazgos críticos, discrecional y acordada caso
+  por caso, **cuando el treasury tenga flujo sostenido**. Somos early-stage y
+  hoy no lo tiene: preferimos decírtelo antes de que inviertas tu tiempo, no
+  después. Un programa formal con tabla de pagos llegará junto con la auditoría
+  externa.
 - Te damos crédito público al desplegar el fix, salvo que prefieras el anonimato.
 
 ## Divulgación responsable
