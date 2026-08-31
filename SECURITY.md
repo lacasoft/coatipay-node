@@ -11,8 +11,8 @@ En español o inglés, como prefieras. Incluye qué falla, cómo reproducirlo y 
 impacto le ves. Un reporte parcial es mejor que ninguno.
 
 - Acusamos recibo en **48 horas**.
-- **Reconocimiento público** cuando el fix esté desplegado, y sitio en el hall
-  of fame de este documento.
+- **Reconocimiento público** cuando el fix esté desplegado, y sitio en el [hall
+  of fame](https://github.com/lacasoft/coatipay-protocol/blob/master/SECURITY.md#hall-of-fame) del protocolo.
 - **Recompensa en USDC** por hallazgos críticos, discrecional y acordada caso
   por caso, **cuando el treasury tenga flujo sostenido**. Somos early-stage y
   hoy no lo tiene: preferimos decírtelo antes de que inviertas tu tiempo, no
