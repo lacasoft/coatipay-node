@@ -102,9 +102,10 @@ Pagas el **gas** de cada liquidación. Por eso el daemon **rechaza pagos
 demasiado pequeños**: liquidar por debajo del coste sería perder dinero. Ese
 umbral se escala solo con el gas en vivo (ver `MIN_PAYMENT_AMOUNT`).
 
-Tu **stake es la garantía**. Enrutar bien construye reputación; comportarse mal
-cuesta stake. Y si retiras el stake por debajo del mínimo, **el API deja de
-darte trabajo** aunque sigas registrado: sin nada que perder no hay garantía.
+Tu **stake es tu credencial**: te da entrada al registro y es lo que impide que
+alguien levante mil nodos sin coste. **Nadie puede confiscarlo** —ni siquiera el
+guardian— y lo recuperas con un retiro que tarda 7 días. Si lo retiras por
+debajo del mínimo, **el API deja de darte trabajo** aunque sigas registrado.
 
 ---
 
@@ -112,7 +113,8 @@ darte trabajo** aunque sigas registrado: sin nada que perder no hay garantía.
 
 | Servicio | Responsabilidad |
 |---|---|
-| **Settler** | Toma autorizaciones de la cola y las liquida on-chain |
+| **Preflight** | Al arrancar comprueba que el hub configurado es el actual y que tu operador está activo en el registro. Si no, no arranca, y dice por qué |
+| **Settler** | Toma autorizaciones de la cola y las liquida on-chain. Si el pagador usa un Coinbase Smart Wallet aún sin desplegar, lo despliega primero, y **solo** llama a `createAccount` en las fábricas de Coinbase: cualquier otra llamada que venga en la firma se rechaza sin enviar nada |
 | **Watcher** | Sigue los eventos `IntentSettled` y confirma al API |
 | **Health** | Expone `/health` con el estado de cada subsistema |
 
@@ -125,7 +127,7 @@ así que nunca dos toman la misma autorización.
 
 ```bash
 npm install
-npm test          # 48 tests
+npm test
 npm run typecheck
 npm run dev       # recarga en caliente
 ```

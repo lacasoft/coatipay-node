@@ -7,7 +7,7 @@ natural — ambos son bienvenidos en issues y pull requests.
 
 ```bash
 npm install
-npm test          # 48 tests
+npm test
 npm run typecheck
 npm run dev       # recarga en caliente
 ```
@@ -23,6 +23,22 @@ npm run typecheck && npm test && npm run build
 ```
 
 Si arreglas un fallo, añade el test que lo reproduce.
+
+## De dónde viene el código
+
+`src/` se desarrolla junto a la API de CoatiPay, que no es pública: la mayoría
+de los cambios al nodo tocan también el canal con la API, y así se pueden hacer
+a la vez. De allí llega aquí mediante un pull request de sincronización, sin
+transformaciones: lo que ejecutas es lo mismo que ejecuta el nodeit de
+CoatiPay.
+
+**Tus pull requests son bienvenidos igual.** Los revisamos aquí y, si entran,
+los incorporamos en la fuente; la siguiente sincronización los trae de vuelta
+con el resto. Un cambio que entrara solo aquí lo desharía la sincronización
+siguiente, así que no lo mergeamos sin llevarlo antes a la fuente.
+
+Lo que **no** se sincroniza es propio de este repositorio: este archivo, el
+README, SECURITY, la licencia, `.env.example` y la configuración de CI.
 
 ## Dos cosas que conviene saber
 
