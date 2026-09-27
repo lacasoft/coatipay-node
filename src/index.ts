@@ -6,8 +6,7 @@ import { InternalApiClient } from './lib/internal-api-client'
 import { initNodeStatus } from './lib/node-status'
 import { healthRoute, infoRoute } from './routes/health'
 import { startAuthorizationSettler } from './services/authorization-settler'
-import { preflight } from './services/preflight'
-import { verifyRegistration } from './services/registry'
+import { ConfiguracionIncorrecta, preflight } from './services/preflight'
 
 const config = loadConfig()
 
@@ -36,28 +35,29 @@ process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
 
 async function start() {
-  await verifyRegistration(config, app.log)
-
   // ── ADR-003 Phase B4: ERC-3009 settlement services ──────────────
   // Create chain clients (null in dev) + API client (used by the settler).
   const hubClients = isDevChainConfig(config.settlementHubAddress)
     ? null
     : createDaemonChainClients({
         privateKey: config.privateKey as Hex,
+        chain: config.chain,
         baseRpcUrl: config.baseRpcUrl,
         baseRpcFallbackUrls: config.baseRpcFallbackUrls,
         settlementHubAddress: config.settlementHubAddress as Address,
       })
-  // Comprobaciones on-chain antes de aceptar trabajo: que el hub configurado sea
-  // el que espera este codigo, y que estemos registrados. Las dos cosas fallaron
-  // en produccion sin que /health lo reflejara.
+  // Comprobaciones on-chain antes de aceptar trabajo: que cada RPC sirva la
+  // red declarada, que el hub y su USDC sean los configurados, y que estemos
+  // registrados. Todo falló alguna vez sin que /health lo reflejara. Sin hub
+  // solo se llega aquí fuera de producción (la configuración lo impide).
+  // Si la cadena no responde, se espera: sin ella el nodo no puede trabajar, y
+  // no se empieza sin haber comprobado.
   if (hubClients) {
-    await preflight(
-      hubClients,
-      config.operatorAddress as Address,
-      config.nodeRegistryAddress,
-      app.log,
-    )
+    let espera = 5_000
+    while ((await preflight(hubClients, config, app.log)) === 'sin_respuesta') {
+      await new Promise((r) => setTimeout(r, espera))
+      espera = Math.min(espera * 2, 60_000)
+    }
   }
 
   const api = new InternalApiClient({ apiUrl: config.apiUrl, privateKey: config.privateKey })
@@ -85,6 +85,10 @@ async function start() {
 }
 
 start().catch((err) => {
-  app.log.error(err)
+  if (err instanceof ConfiguracionIncorrecta) {
+    app.log.fatal(`Configuración incorrecta — el nodo no arranca. ${err.message}`)
+  } else {
+    app.log.error(err)
+  }
   process.exit(1)
 })

@@ -1,7 +1,8 @@
 import { encodeAbiParameters, encodeFunctionData, erc20Abi, type Hex } from 'viem'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DaemonChainClients } from '../../lib/chain-client'
-import { InternalApiClient } from '../../lib/internal-api-client'
+import { InternalApiClient, InternalApiError } from '../../lib/internal-api-client'
+import { computeHealth, initNodeStatus } from '../../lib/node-status'
 import { intentIdToBytes32 } from '../../lib/settlement-hub-abi.js'
 import { startAuthorizationSettler } from '../../services/authorization-settler'
 
@@ -12,13 +13,14 @@ const MERCHANT = '0x4444444444444444444444444444444444444444' as `0x${string}`
 
 const baseConfig = {
   port: 4000,
+  chain: 'base-sepolia' as const,
+  isProduction: false,
   operatorAddress: OPERATOR,
   privateKey: `0x${'01'.repeat(32)}` as Hex,
   endpoint: 'http://localhost:4000',
   baseRpcUrl: 'https://sepolia.base.org',
   baseRpcFallbackUrls: [],
   nodeRegistryAddress: '0xRegistry',
-  stakeManagerAddress: '0xStake',
   settlementHubAddress: HUB,
   usdcAddress: '0xUSDC',
   apiUrl: 'http://localhost:3000',
@@ -1272,5 +1274,45 @@ describe('regresión · el settler solo despliega con la fábrica permitida', ()
     const pago = r.escrituras.find((e) => e.functionName === 'payIntentBatchWithAuthorization')
     expect(pago).toBeDefined()
     expect(pago?.args[0]).toHaveLength(1)
+  })
+})
+
+describe('/health sabe si la API deja trabajar al nodo', () => {
+  /// Una vuelta del settler con la respuesta indicada de /claim-batch.
+  async function vueltaCon(respuesta: () => Promise<unknown>) {
+    initNodeStatus({ enabled: true, chain: 'base-sepolia' })
+    const { api } = buildApiMock()
+    ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post =
+      vi.fn(respuesta)
+    const stop = startAuthorizationSettler({
+      config: baseConfig,
+      hubClients: buildHubClients(),
+      api,
+      logger: mockLogger as never,
+    })
+    await vi.advanceTimersByTimeAsync(5_001)
+    stop()
+    return computeHealth()
+  }
+
+  it('un 403 es «rechazado»: el nodeit no está activo para la API', async () => {
+    const h = await vueltaCon(async () => {
+      throw new InternalApiError(403, '/v1/internal/authorizations/claim-batch', 'inactive')
+    })
+    expect(h.api).toBe('rejected')
+    expect(h.status).toBe('down')
+  })
+
+  it('cualquier otro fallo es «caída»', async () => {
+    const h = await vueltaCon(async () => {
+      throw new Error('fetch failed')
+    })
+    expect(h.api).toBe('down')
+    expect(h.status).toBe('down')
+  })
+
+  it('una respuesta, aunque venga vacía, es «ok»', async () => {
+    const h = await vueltaCon(async () => batchOf())
+    expect(h.api).toBe('ok')
   })
 })

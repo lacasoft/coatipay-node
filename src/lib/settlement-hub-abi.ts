@@ -21,6 +21,15 @@ export const SETTLEMENT_HUB_ABI = [
     inputs: [],
     outputs: [{ name: '', type: 'address' }],
   },
+  // USDC con el que se desplegó el hub (immutable). El preflight lo compara
+  // con USDC_ADDRESS: un USDC equivocado solo fallaría más tarde, al liquidar.
+  {
+    type: 'function',
+    name: 'usdc',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'address' }],
+  },
   {
     type: 'function',
     name: 'registerIntent',

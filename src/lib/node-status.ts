@@ -28,6 +28,10 @@ const SETTLER_STALE_MS = 150_000
 export type GasStatus = 'healthy' | 'warning' | 'critical' | 'offline'
 export type RpcStatus = 'ok' | 'down'
 export type SettlerStatus = 'running' | 'stalled' | 'disabled'
+/// Si la API acepta al nodo. `rejected` = 403 (no autorizado: stake por debajo
+/// del mínimo, dado de baja…); `down` = no responde; `unknown` = aún no se ha
+/// llamado.
+export type ApiStatus = 'ok' | 'rejected' | 'down' | 'unknown' | 'disabled'
 export type OverallStatus = 'ok' | 'degraded' | 'down'
 
 export interface HealthReport {
@@ -39,6 +43,7 @@ export interface HealthReport {
   gas: GasStatus
   rpc: RpcStatus
   settler: SettlerStatus
+  api: ApiStatus
 }
 
 export interface NodeStatusState {
@@ -50,6 +55,7 @@ export interface NodeStatusState {
   balanceAt: number | null
   rpcOk: boolean
   settlerLastTickAt: number | null
+  api: Exclude<ApiStatus, 'disabled'>
 }
 
 function freshState(now: number): NodeStatusState {
@@ -61,6 +67,7 @@ function freshState(now: number): NodeStatusState {
     balanceAt: null,
     rpcOk: true, // optimistic until the first failure
     settlerLastTickAt: null,
+    api: 'unknown',
   }
 }
 
@@ -81,6 +88,13 @@ export function recordBalance(wei: bigint, now = Date.now()): void {
 /// An RPC/transport read failed (settler getBalance).
 export function recordRpcError(): void {
   state.rpcOk = false
+}
+
+/// Resultado de la última llamada a la API. Antes el settler marcaba su vuelta
+/// aunque la API lo rechazara, y /health decía `ok` con el nodo sin poder
+/// trabajar.
+export function recordApiResult(resultado: 'ok' | 'rejected' | 'down'): void {
+  state.api = resultado
 }
 
 /// The settler loop completed a tick (alive), regardless of outcome.
@@ -107,12 +121,16 @@ function rollup(
   gas: GasStatus,
   rpc: RpcStatus,
   settler: SettlerStatus,
+  api: ApiStatus,
 ): OverallStatus {
   // `offline` before the first balance read is boot warm-up (degraded), not
   // an outage; `offline` after a real reading means RPC is down.
   const gasNeverRead = s.balanceAt === null
   const gasDown = gas === 'critical' || (gas === 'offline' && !gasNeverRead)
-  if (gasDown || rpc === 'down' || settler === 'stalled') return 'down'
+  // Un nodo que no puede hablar con la API no puede trabajar.
+  if (gasDown || rpc === 'down' || settler === 'stalled' || api === 'down' || api === 'rejected') {
+    return 'down'
+  }
   if (gas === 'warning' || (gas === 'offline' && gasNeverRead)) {
     return 'degraded'
   }
@@ -135,19 +153,21 @@ export function deriveHealth(s: NodeStatusState, now: number): HealthReport {
       gas: 'offline',
       rpc: 'down',
       settler: 'disabled',
+      api: 'disabled',
     }
   }
   const gas = deriveGas(s)
   const rpc: RpcStatus = s.rpcOk ? 'ok' : 'down'
   const settler = deriveSettler(s, now)
   return {
-    status: rollup(s, gas, rpc, settler),
+    status: rollup(s, gas, rpc, settler, s.api),
     version: VERSION,
     uptime_seconds: uptime,
     chain: s.chain,
     gas,
     rpc,
     settler,
+    api: s.api,
   }
 }
 

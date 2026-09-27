@@ -10,6 +10,8 @@ import { base, baseSepolia } from 'viem/chains'
 
 export interface ChainClientConfig {
   privateKey: Hex
+  /// Red declarada (CHAIN). No se deduce del texto de la URL.
+  chain: 'base' | 'base-sepolia'
   baseRpcUrl: string
   /// Optional backup RPC endpoints (failover). The chain's public RPC is
   /// always appended as a last-resort backup.
@@ -33,7 +35,7 @@ export interface DaemonChainClients {
 
 export function createDaemonChainClients(cfg: ChainClientConfig): DaemonChainClients {
   const account = privateKeyToAccount(cfg.privateKey)
-  const isTestnet = cfg.baseRpcUrl.includes('sepolia')
+  const isTestnet = cfg.chain === 'base-sepolia'
   const chain = isTestnet ? baseSepolia : base
   const transport = buildRpcTransport(
     resolveRpcUrls(cfg.baseRpcUrl, cfg.baseRpcFallbackUrls, isTestnet),

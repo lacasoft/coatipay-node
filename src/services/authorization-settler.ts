@@ -41,10 +41,11 @@ import {
 } from 'viem'
 import { type DaemonChainClients, isDevChainConfig } from '../lib/chain-client'
 import type { Config } from '../lib/config'
-import type { InternalApiClient } from '../lib/internal-api-client'
+import { type InternalApiClient, InternalApiError } from '../lib/internal-api-client'
 import {
   GAS_CRITICAL_WEI,
   markSettlerTick,
+  recordApiResult,
   recordBalance,
   recordRpcError,
 } from '../lib/node-status'
@@ -237,9 +238,18 @@ async function runOnce(ctx: SettlerContext): Promise<boolean> {
   }
 
   // ── 2. Greedy per-cycle claim: pull up to MAX_BATCH_SIZE at once ──
-  const result = await ctx.api.post<ClaimBatchResponse>('/v1/internal/authorizations/claim-batch', {
-    max: MAX_BATCH_SIZE,
-  })
+  let result: ClaimBatchResponse | null
+  try {
+    result = await ctx.api.post<ClaimBatchResponse>('/v1/internal/authorizations/claim-batch', {
+      max: MAX_BATCH_SIZE,
+    })
+    recordApiResult('ok')
+  } catch (err) {
+    // /health tiene que saberlo: la vuelta del settler sigue, pero sin la API
+    // el nodo no trabaja.
+    recordApiResult(err instanceof InternalApiError && err.status === 403 ? 'rejected' : 'down')
+    throw err
+  }
   const claimedList = result?.authorizations ?? []
 
   // ── 3. Empty queue — nothing to do ───────────────────────────────
