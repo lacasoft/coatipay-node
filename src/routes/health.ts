@@ -1,13 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { computeHealth } from '../lib/node-status'
 
-/**
- * Base URL for the error reference in this node's error responses.
- * Env-driven (`DOCS_URL`) so the docs can move without a code change — the API
- * reads the same variable; each service carries its own env.
- */
-const DOCS_URL = (process.env.DOCS_URL || 'https://docs.coatipay.com').replace(/\/+$/, '')
-
 export async function healthRoute(app: FastifyInstance) {
   // Public, coarse, non-sensitive node health. Beyond a liveness ping it
   // surfaces a rollup `status` plus per-subsystem buckets (gas / rpc /

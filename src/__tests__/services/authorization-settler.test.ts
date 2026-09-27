@@ -1,7 +1,8 @@
-import { encodeAbiParameters, type Hex } from 'viem'
+import { encodeAbiParameters, encodeFunctionData, erc20Abi, type Hex } from 'viem'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DaemonChainClients } from '../../lib/chain-client'
 import { InternalApiClient } from '../../lib/internal-api-client'
+import { intentIdToBytes32 } from '../../lib/settlement-hub-abi.js'
 import { startAuthorizationSettler } from '../../services/authorization-settler'
 
 const HUB = '0x1111111111111111111111111111111111111111' as `0x${string}`
@@ -86,6 +87,15 @@ function makeClaimResponse(
       amount: '5000000',
       expires_at: String(Math.floor(Date.now() / 1000) + 1800),
       on_chain_id: (overrides.onChainId ?? null) as string | null,
+    },
+    // El API firma el registro (ADR-004); el daemon lo reenvía tal cual.
+    registration: {
+      intent_id: intentIdToBytes32(intentId),
+      merchant: MERCHANT,
+      operator: OPERATOR,
+      amount: '5000000',
+      expires_at: String(Math.floor(Date.now() / 1000) + 1800),
+      signature: `0x${'cd'.repeat(65)}`,
     },
   }
 }
@@ -262,8 +272,8 @@ describe('startAuthorizationSettler', () => {
   })
 
   it('ERC-6492: deploys the counterfactual wallet, then settles with the inner sig', async () => {
-    const FACTORY = '0x5555555555555555555555555555555555555555' as Hex
-    const FACTORY_CALLDATA = '0xdeadbeef' as Hex
+    const FACTORY = '0x0BA5ED0c6AA8c49038F819E587E2633c4A9F428a' as Hex
+    const FACTORY_CALLDATA = '0x3ffba36fdeadbeef' as Hex
     const INNER_SIG = `0x${'cd'.repeat(65)}` as Hex
     const MAGIC = '6492649264926492649264926492649264926492649264926492649264926492'
     const sig6492 = (encodeAbiParameters(
@@ -330,7 +340,7 @@ describe('startAuthorizationSettler', () => {
     // Coinbase wraps the deploy in Multicall3.aggregate3 (allowFailure swallows
     // reverts). The settler must call the INNER factory directly, not Multicall3.
     const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11' as Hex
-    const REAL_FACTORY = '0xba5ed1f7ee9c56e12a0e2c90cdc0ae93ef8d2f00' as Hex
+    const REAL_FACTORY = '0x0BA5ED0c6AA8c49038F819E587E2633c4A9F428a' as Hex
     const CREATE_CALLDATA = '0x3ffba36fdeadbeef' as Hex
     const INNER_SIG = `0x${'cd'.repeat(80)}` as Hex // Coinbase 1271 sig (≠ 65 bytes)
     const MAGIC = '6492649264926492649264926492649264926492649264926492649264926492'
@@ -412,7 +422,7 @@ describe('startAuthorizationSettler', () => {
     const MAGIC = '6492649264926492649264926492649264926492649264926492649264926492'
     const sig6492 = (encodeAbiParameters(
       [{ type: 'address' }, { type: 'bytes' }, { type: 'bytes' }],
-      ['0x5555555555555555555555555555555555555555', '0xdeadbeef', INNER_SIG],
+      ['0x0BA5ED0c6AA8c49038F819E587E2633c4A9F428a', '0x3ffba36fdeadbeef', INNER_SIG],
     ) + MAGIC) as Hex
 
     const hubClients = buildHubClients({
@@ -909,6 +919,14 @@ describe('economic guard (never settle at a loss)', () => {
         nonce: '0xabcd000000000000000000000000000000000000000000000000000000000000',
         signature: `0x${'ab'.repeat(65)}`,
       },
+      registration: {
+        intent_id: intentIdToBytes32('pi_low'),
+        merchant: MERCHANT,
+        operator: OPERATOR,
+        amount,
+        expires_at: String(validBefore),
+        signature: `0x${'cd'.repeat(65)}` as `0x${string}`,
+      },
       intent: {
         intent_id: 'pi_low',
         merchant_address: MERCHANT,
@@ -987,5 +1005,205 @@ describe('economic guard (never settle at a loss)', () => {
     // Held: not settled, not rejected (sweeper will re-queue it).
     expect(postCalls.some((c) => c.path.endsWith('/rejected'))).toBe(false)
     expect(hubClients.walletClient.writeContract).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Regresión — el settler ya no ejecuta la «fábrica» ERC-6492 que elige el pagador.
+ *
+ * Reproducido antes del arreglo contra un fork de Base Sepolia: con fábrica =
+ * USDC y datos = transfer(atacante, …), el nodeit transfería sus propios USDC;
+ * y por Multicall3 además se desactivaba a sí mismo del registro. Ahora solo va
+ * a la fábrica permitida con `createAccount`, y lo comprueba antes de cualquier
+ * transacción.
+ */
+describe('regresión · el settler solo despliega con la fábrica permitida', () => {
+  const USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as Hex
+  const REGISTRY = '0xaaCc18e5585e8Da0C9c1afD0B73255A73E40DC62' as Hex
+  const FABRICA = '0x0BA5ED0c6AA8c49038F819E587E2633c4A9F428a' as Hex
+  const ATACANTE = '0xa77ac0000000000000000000000000000000beef' as Hex
+  const MULTICALL3 = '0xca11bde05977b3631167028862be2a173976ca11' as Hex
+  const MAGIC = '6492649264926492649264926492649264926492649264926492649264926492'
+  const FIRMA_INTERNA = `0x${'cd'.repeat(65)}` as Hex
+
+  const robo = encodeFunctionData({
+    abi: erc20Abi,
+    functionName: 'transfer',
+    args: [ATACANTE, 40_000_000n],
+  })
+  const crear = '0x3ffba36fdeadbeef' as Hex
+  const envolver = (fabrica: Hex, datos: Hex) =>
+    (encodeAbiParameters(
+      [{ type: 'address' }, { type: 'bytes' }, { type: 'bytes' }],
+      [fabrica, datos, FIRMA_INTERNA],
+    ) + MAGIC) as Hex
+  const aggregate3 = (calls: { target: Hex; callData: Hex }[]) =>
+    encodeFunctionData({
+      abi: [
+        {
+          type: 'function',
+          name: 'aggregate3',
+          stateMutability: 'payable',
+          inputs: [
+            {
+              name: 'calls',
+              type: 'tuple[]',
+              components: [
+                { name: 'target', type: 'address' },
+                { name: 'allowFailure', type: 'bool' },
+                { name: 'callData', type: 'bytes' },
+              ],
+            },
+          ],
+          outputs: [],
+        },
+      ],
+      functionName: 'aggregate3',
+      args: [calls.map((c) => ({ ...c, allowFailure: false }))],
+    })
+
+  async function ejecutar(...claims: ReturnType<typeof makeClaimResponse>[]) {
+    const hubClients = buildHubClients({
+      publicClient: {
+        getBalance: vi.fn().mockResolvedValue(10n ** 18n),
+        // Por función: `authorizationState` (nonce de USDC) es un booleano. Un
+        // objeto aquí se leería como «nonce ya usado» y rechazaría la buena.
+        readContract: vi.fn(async ({ functionName }: { functionName: string }) =>
+          functionName === 'authorizationState'
+            ? false
+            : {
+                merchant: MERCHANT,
+                amount: 5_000_000n,
+                operator: OPERATOR,
+                expiresAt: 9999999999n,
+                status: 0,
+              },
+        ),
+        // Sin código: si la política dejara pasar algo, el settler intentaría
+        // «desplegar» y esa sendTransaction sería la llamada del atacante.
+        getCode: vi.fn().mockResolvedValue('0x'),
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: 'success', logs: [] }),
+        getContractEvents: vi.fn().mockResolvedValue([]),
+      } as never,
+      walletClient: {
+        writeContract: vi.fn().mockResolvedValue('0xpaytx' as Hex),
+        sendTransaction: vi.fn().mockResolvedValue('0xtx' as Hex),
+      } as never,
+    })
+    const { api, postCalls } = buildApiMock()
+    let entregado = false
+    ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
+      async (path: string, body: unknown) => {
+        postCalls.push({ path, body })
+        if (!path.endsWith('/claim-batch') || entregado) return null
+        entregado = true
+        return batchOf(...claims)
+      },
+    )
+    const stop = startAuthorizationSettler({
+      config: baseConfig,
+      hubClients,
+      api,
+      logger: mockLogger as never,
+    })
+    await vi.advanceTimersByTimeAsync(5_001)
+    for (let k = 0; k < 6; k++) await Promise.resolve()
+    stop()
+    const enviadas = (hubClients.walletClient.sendTransaction as ReturnType<typeof vi.fn>).mock
+      .calls
+    const escrituras = (
+      hubClients.walletClient.writeContract as ReturnType<typeof vi.fn>
+    ).mock.calls.map((c) => c[0] as { functionName: string; args: unknown[] })
+    const rechazos = postCalls.filter((c) => c.path.endsWith('/rejected'))
+    return { enviadas, escrituras, rechazos }
+  }
+
+  it('fábrica = USDC con transfer(atacante): no envía NADA y rechaza la autorización', async () => {
+    const r = await ejecutar(makeClaimResponse({ signature: envolver(USDC, robo) }))
+    expect(r.enviadas).toHaveLength(0)
+    // Ni siquiera registra el intent: el rechazo va antes de gastar gas.
+    expect(r.escrituras).toHaveLength(0)
+    expect(r.rechazos.map((c) => c.path)).toEqual(['/v1/internal/authorizations/pa_1/rejected'])
+    expect(JSON.stringify(r.rechazos[0]?.body)).toContain('erc6492_deploy_refused')
+  })
+
+  it('Multicall3 con un createAccount LEGÍTIMO más un transfer: rechaza el conjunto', async () => {
+    // La sutileza: esta firma podría validar de verdad (el createAccount crea un
+    // monedero real), así que verificarla no basta. Cada llamada desempaquetada
+    // tiene que pasar la política por sí sola.
+    const mixto = aggregate3([
+      { target: FABRICA, callData: crear },
+      { target: USDC, callData: robo },
+    ])
+    const r = await ejecutar(makeClaimResponse({ signature: envolver(MULTICALL3, mixto) }))
+    expect(r.enviadas).toHaveLength(0)
+    expect(r.escrituras).toHaveLength(0)
+    expect(r.rechazos).toHaveLength(1)
+  })
+
+  it('Multicall3 con deactivate() del registro: rechaza', async () => {
+    const desactivar = encodeFunctionData({
+      abi: [
+        {
+          type: 'function',
+          name: 'deactivate',
+          inputs: [],
+          outputs: [],
+          stateMutability: 'nonpayable',
+        },
+      ],
+      functionName: 'deactivate',
+    })
+    const r = await ejecutar(
+      makeClaimResponse({
+        signature: envolver(MULTICALL3, aggregate3([{ target: REGISTRY, callData: desactivar }])),
+      }),
+    )
+    expect(r.enviadas).toHaveLength(0)
+    expect(r.rechazos).toHaveLength(1)
+  })
+
+  it('acepta las dos versiones de la fábrica de Coinbase (v1 y v1.1)', async () => {
+    // v1.1 es la que usa viem por defecto para monederos nuevos: dejarla fuera
+    // rechazaría pagos legítimos.
+    for (const fabrica of [FABRICA, '0xba5ed110efdba3d005bfc882d75358acbbb85842' as Hex]) {
+      const r = await ejecutar(makeClaimResponse({ signature: envolver(fabrica, crear) }))
+      expect(r.enviadas).toHaveLength(1)
+      const envio = r.enviadas[0]?.[0] as { to: string } | undefined
+      expect(envio?.to.toLowerCase()).toBe(fabrica.toLowerCase())
+      // El mock no tiene código tras el despliegue, así que acaba rechazada —
+      // pero por esa comprobación posterior, no por la política.
+      expect(JSON.stringify(r.rechazos)).not.toContain('erc6492_deploy_refused')
+    }
+  })
+
+  it('la fábrica permitida con otra función: rechaza', async () => {
+    const r = await ejecutar(
+      makeClaimResponse({ signature: envolver(FABRICA, '0x12345678' as Hex) }),
+    )
+    expect(r.enviadas).toHaveLength(0)
+    expect(r.rechazos).toHaveLength(1)
+  })
+
+  it('un envoltorio ilegible es rechazo permanente, no un reintento eterno', async () => {
+    const roto = `0x${'00'.repeat(20)}${MAGIC}` as Hex
+    const r = await ejecutar(makeClaimResponse({ signature: roto }))
+    expect(r.enviadas).toHaveLength(0)
+    expect(r.rechazos).toHaveLength(1)
+  })
+
+  it('en un lote, la autorización rechazada NO envenena a las demás', async () => {
+    // Un fallo dentro del lote deja TODAS las filas para reintentar. Si la
+    // mala siguiera dentro, volvería en cada lote y lo tumbaría otra vez hasta
+    // que caducaran las legítimas que iban con ella.
+    const r = await ejecutar(
+      makeClaimResponse({ id: 'pa_malo', intentId: 'pi_malo', signature: envolver(USDC, robo) }),
+      makeClaimResponse({ id: 'pa_bueno', intentId: 'pi_bueno' }),
+    )
+    expect(r.enviadas).toHaveLength(0)
+    expect(r.rechazos.map((c) => c.path)).toEqual(['/v1/internal/authorizations/pa_malo/rejected'])
+    const pago = r.escrituras.find((e) => e.functionName === 'payIntentBatchWithAuthorization')
+    expect(pago).toBeDefined()
+    expect(pago?.args[0]).toHaveLength(1)
   })
 })

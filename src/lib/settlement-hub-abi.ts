@@ -10,15 +10,32 @@
 import { keccak256, toHex } from 'viem'
 
 export const SETTLEMENT_HUB_ABI = [
+  // Solo existe en el hub de ADR-004. Sirve de comprobacion al arrancar: si el
+  // contrato configurado no responde a esto, es una direccion vieja o no es un
+  // hub, y el daemon fallaria en cada pago sin decir por que.
+  {
+    type: 'function',
+    name: 'intentSigner',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'address' }],
+  },
   {
     type: 'function',
     name: 'registerIntent',
     inputs: [
-      { name: 'intentId', type: 'bytes32' },
-      { name: 'merchant', type: 'address' },
-      { name: 'operator', type: 'address' },
-      { name: 'amount', type: 'uint256' },
-      { name: 'expiresAt', type: 'uint64' },
+      {
+        name: 'reg',
+        type: 'tuple',
+        components: [
+          { name: 'intentId', type: 'bytes32' },
+          { name: 'merchant', type: 'address' },
+          { name: 'operator', type: 'address' },
+          { name: 'amount', type: 'uint256' },
+          { name: 'expiresAt', type: 'uint64' },
+          { name: 'signature', type: 'bytes' },
+        ],
+      },
     ],
     outputs: [],
     stateMutability: 'nonpayable',
@@ -47,11 +64,18 @@ export const SETTLEMENT_HUB_ABI = [
     type: 'function',
     name: 'registerIntentBatch',
     inputs: [
-      { name: 'intentIds', type: 'bytes32[]' },
-      { name: 'merchants', type: 'address[]' },
-      { name: 'operators', type: 'address[]' },
-      { name: 'amounts', type: 'uint256[]' },
-      { name: 'expirations', type: 'uint64[]' },
+      {
+        name: 'regs',
+        type: 'tuple[]',
+        components: [
+          { name: 'intentId', type: 'bytes32' },
+          { name: 'merchant', type: 'address' },
+          { name: 'operator', type: 'address' },
+          { name: 'amount', type: 'uint256' },
+          { name: 'expiresAt', type: 'uint64' },
+          { name: 'signature', type: 'bytes' },
+        ],
+      },
     ],
     outputs: [{ name: 'registered', type: 'uint256' }],
     stateMutability: 'nonpayable',

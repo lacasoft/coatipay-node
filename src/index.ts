@@ -6,6 +6,7 @@ import { InternalApiClient } from './lib/internal-api-client'
 import { initNodeStatus } from './lib/node-status'
 import { healthRoute, infoRoute } from './routes/health'
 import { startAuthorizationSettler } from './services/authorization-settler'
+import { preflight } from './services/preflight'
 import { verifyRegistration } from './services/registry'
 import { startSettlementEventWatcher } from './services/settlement-event-watcher'
 
@@ -49,6 +50,18 @@ async function start() {
         baseRpcFallbackUrls: config.baseRpcFallbackUrls,
         settlementHubAddress: config.settlementHubAddress as Address,
       })
+  // Comprobaciones on-chain antes de aceptar trabajo: que el hub configurado sea
+  // el que espera este codigo, y que estemos registrados. Las dos cosas fallaron
+  // en produccion sin que /health lo reflejara.
+  if (hubClients) {
+    await preflight(
+      hubClients,
+      config.operatorAddress as Address,
+      config.nodeRegistryAddress,
+      app.log,
+    )
+  }
+
   const api = new InternalApiClient({ apiUrl: config.apiUrl, privateKey: config.privateKey })
 
   // Seed the /health snapshot. `enabled=false` in dev (no SettlementHub) →
