@@ -4,6 +4,9 @@
   "private": true,
   "description": "CoatiPay node daemon — runs a community routing node",
   "main": "./dist/index.js",
+  "engines": {
+    "node": ">=22.9"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "tsx watch src/index.ts",

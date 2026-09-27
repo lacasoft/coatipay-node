@@ -41,6 +41,7 @@ operador porque no puedes firmar con su llave — y nadie puede actuar como tú.
 | Stake | 40 USDC (testnet) · 100 USDC (mainnet) | más |
 | RPC de Base | público | dedicado + respaldos |
 | ETH para gas | sí — tú pagas el gas de cada liquidación | |
+| Node.js (sin Docker) | 22.9 | 22 LTS más reciente |
 
 Necesitas además un **endpoint HTTPS público** apuntando al daemon.
 
@@ -66,7 +67,7 @@ depositado. Direcciones canónicas en
 
 ```bash
 cp .env.example .env    # rellena tu llave y tu endpoint
-npm install && npm run build && npm start
+npm install && npm run build && npm start    # npm start lee el .env
 ```
 
 O con Docker:
@@ -84,12 +85,24 @@ docker run -d --name coatipay-node \
 curl https://nodeit.tudominio.com/health
 ```
 
-Debe responder `status: ok` y `settler: running`. Aparecerás en
+Debe responder `status: ok`, `settler: running` y `api: ok`. Aparecerás en
 `GET /v1/nodes` del API.
 
-> **`/health` no basta para saber si estás liquidando.** El proceso puede estar
-> `running` con todas sus llamadas rechazadas. Mira también los logs: si ves
-> `tick failed`, algo va mal aunque el health diga que sí.
+El campo `api` dice si el API te deja trabajar:
+
+| `api` | Qué significa |
+|---|---|
+| `ok` | El API acepta tus llamadas |
+| `rejected` | Te responde 403: no estás registrado y activo, tu stake no alcanza el mínimo, o la hora de tu máquina va desfasada |
+| `down` | No responde |
+
+Con `rejected` o `down`, `status` es `down` aunque el proceso siga vivo.
+
+Antes de aceptar trabajo, el daemon comprueba contra la cadena que cada RPC
+sirve la red de `CHAIN`, que `SETTLEMENT_HUB_ADDRESS` es un SettlementHub de esa
+red con su USDC, y que tu operador está activo en el registro. Si algo no
+cuadra, **no arranca**, y el log dice qué variable revisar. Si la cadena no
+responde, espera y lo vuelve a intentar.
 
 ---
 
@@ -113,9 +126,9 @@ debajo del mínimo, **el API deja de darte trabajo** aunque sigas registrado.
 
 | Servicio | Responsabilidad |
 |---|---|
-| **Preflight** | Al arrancar comprueba que el hub configurado es el actual y que tu operador está activo en el registro. Si no, no arranca, y dice por qué |
+| **Preflight** | Al arrancar comprueba, contra la cadena, que cada RPC sirve la red de `CHAIN`, que el hub configurado es un SettlementHub de esa red con su USDC, y que tu operador está activo en el registro. Si no, no arranca, y dice por qué |
 | **Settler** | Toma autorizaciones de la cola y las liquida on-chain. Si el pagador usa un Coinbase Smart Wallet aún sin desplegar, lo despliega primero, y **solo** llama a `createAccount` en las fábricas de Coinbase: cualquier otra llamada que venga en la firma se rechaza sin enviar nada |
-| **Health** | Expone `/health` con el estado de cada subsistema |
+| **Health** | Expone `/health` con el estado de cada subsistema: gas, RPC, settler y si el API te acepta |
 
 El nodo **no vigila eventos ni informa de qué se pagó**: eso lo lee la API
 directamente de la cadena, y no aceptaría la palabra de un nodo
