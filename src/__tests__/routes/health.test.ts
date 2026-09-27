@@ -12,7 +12,6 @@ const mockConfig = {
   baseRpcUrl: 'https://sepolia.base.org',
   baseRpcFallbackUrls: [],
   nodeRegistryAddress: '0x0000000000000000000000000000000000000000',
-  stakeManagerAddress: '0x0000000000000000000000000000000000000000',
   settlementHubAddress: '0x0000000000000000000000000000000000000000',
   usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
   apiUrl: 'http://localhost:3000',

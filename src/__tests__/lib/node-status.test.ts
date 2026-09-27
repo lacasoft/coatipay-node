@@ -19,6 +19,7 @@ function healthyState(overrides: Partial<NodeStatusState> = {}): NodeStatusState
     balanceAt: NOW - 5_000,
     rpcOk: true,
     settlerLastTickAt: NOW - 5_000,
+    api: 'ok',
     ...overrides,
   }
 }
@@ -99,5 +100,23 @@ describe('deriveHealth', () => {
       NOW,
     )
     expect(h.settler).toBe('running')
+  })
+
+  it('api → rejected (403) pone el nodo en down: no puede trabajar', () => {
+    const h = deriveHealth(healthyState({ api: 'rejected' }), NOW)
+    expect(h.api).toBe('rejected')
+    expect(h.status).toBe('down')
+  })
+
+  it('api → down pone el nodo en down, aunque el settler siga dando vueltas', () => {
+    // Antes el settler marcaba su vuelta aunque la API fallara, y /health
+    // decía `ok` con el nodo sin poder trabajar.
+    const h = deriveHealth(healthyState({ api: 'down' }), NOW)
+    expect(h.settler).toBe('running')
+    expect(h.status).toBe('down')
+  })
+
+  it('api → unknown antes de la primera llamada no degrada el estado', () => {
+    expect(deriveHealth(healthyState({ api: 'unknown' }), NOW).status).toBe('ok')
   })
 })
