@@ -4,7 +4,7 @@ import { computeHealth } from '../lib/node-status'
 export async function healthRoute(app: FastifyInstance) {
   // Public, coarse, non-sensitive node health. Beyond a liveness ping it
   // surfaces a rollup `status` plus per-subsystem buckets (gas / rpc /
-  // settler / watcher) so a monitor can tell WHY a nodeit is degraded, not
+  // settler) so a monitor can tell WHY a nodeit is degraded, not
   // just THAT it is. No exact balances/addresses — see lib/node-status.ts.
   app.get('/health', async () => computeHealth())
 }

@@ -1,5 +1,5 @@
 // Helper for daemon → API signed POSTs to /v1/internal/*.
-// Used by all 3 ADR-003 Phase B4 services (settler, event-watcher, sweeper).
+// Used by the settler: claim work, hand back what it could not settle.
 // Centralizes signing + 204 handling + error wrapping so the services can
 // focus on their domain logic.
 //

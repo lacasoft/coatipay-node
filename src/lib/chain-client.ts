@@ -1,7 +1,7 @@
 // Wallet + public client factory for daemon → SettlementHub interactions.
-// Shared between the AuthorizationSettler (writes), the
-// SettlementEventWatcher (reads + event subscription), and the
-// AuthorizationSweeper (no chain access — but pulls config consistency).
+// Used by the AuthorizationSettler (writes, plus the view reads it needs) and
+// the startup preflight. The node no longer watches events: the API reads
+// IntentSettled from the hub itself (F-5, ADR-007).
 import { buildRpcTransport, resolveRpcUrls } from '@lacasoft/coatipay-protocol'
 import { type Address, createPublicClient, createWalletClient, type Hex } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'

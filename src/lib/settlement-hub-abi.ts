@@ -5,8 +5,9 @@
 //   - registerIntent: AuthorizationSettler (lazy, on first claim)
 //   - payIntentWithAuthorization: AuthorizationSettler (after register)
 //   - getIntent: AuthorizationSettler (check if intent already on-chain)
-//   - IntentSettled event: SettlementEventWatcher (source of truth for
-//     settlement state — drives the webhook)
+//   - IntentSettled event: AuthorizationSettler, to tell which items of a
+//     batch settled. The settlement state itself is the API's (it reads the
+//     event from the hub).
 import { keccak256, toHex } from 'viem'
 
 export const SETTLEMENT_HUB_ABI = [

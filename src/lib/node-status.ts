@@ -1,6 +1,6 @@
 // Shared, in-memory node health snapshot.
 //
-// The settler and watcher loops record raw observations here each cycle
+// The settler loop records raw observations here each cycle
 // (last tick time, last ETH balance, whether the last RPC read succeeded).
 // The public `/health` route derives a coarse, non-sensitive status from
 // those facts via `computeHealth()`.
@@ -24,14 +24,10 @@ export const GAS_WARNING_WEI = 5n * GAS_CRITICAL_WEI // 0.005 ETH
 /// off to at most 60s when idle, so 150s (2.5×) can't false-positive on a
 /// healthy idle node.
 const SETTLER_STALE_MS = 150_000
-/// No watcher tick in this long ⇒ the poll loop is stuck. It polls every
-/// ~4s, so 60s is many missed polls.
-const WATCHER_STALE_MS = 60_000
 
 export type GasStatus = 'healthy' | 'warning' | 'critical' | 'offline'
 export type RpcStatus = 'ok' | 'down'
 export type SettlerStatus = 'running' | 'stalled' | 'disabled'
-export type WatcherStatus = 'synced' | 'lagging' | 'stalled' | 'disabled'
 export type OverallStatus = 'ok' | 'degraded' | 'down'
 
 export interface HealthReport {
@@ -43,20 +39,17 @@ export interface HealthReport {
   gas: GasStatus
   rpc: RpcStatus
   settler: SettlerStatus
-  watcher: WatcherStatus
 }
 
 export interface NodeStatusState {
   startedAt: number
-  /// false in dev (no SettlementHub) — settler/watcher are no-ops.
+  /// false in dev (no SettlementHub) — the settler is a no-op.
   enabled: boolean
   chain: string
   balanceWei: bigint | null
   balanceAt: number | null
   rpcOk: boolean
   settlerLastTickAt: number | null
-  watcherLastTickAt: number | null
-  watcherErroring: boolean
 }
 
 function freshState(now: number): NodeStatusState {
@@ -68,8 +61,6 @@ function freshState(now: number): NodeStatusState {
     balanceAt: null,
     rpcOk: true, // optimistic until the first failure
     settlerLastTickAt: null,
-    watcherLastTickAt: null,
-    watcherErroring: false,
   }
 }
 
@@ -87,7 +78,7 @@ export function recordBalance(wei: bigint, now = Date.now()): void {
   state.rpcOk = true
 }
 
-/// An RPC/transport read failed (settler getBalance or watcher poll).
+/// An RPC/transport read failed (settler getBalance).
 export function recordRpcError(): void {
   state.rpcOk = false
 }
@@ -95,13 +86,6 @@ export function recordRpcError(): void {
 /// The settler loop completed a tick (alive), regardless of outcome.
 export function markSettlerTick(now = Date.now()): void {
   state.settlerLastTickAt = now
-}
-
-/// The watcher loop completed a poll. `ok=false` means the poll threw.
-export function markWatcherTick(ok: boolean, now = Date.now()): void {
-  state.watcherLastTickAt = now
-  state.watcherErroring = !ok
-  if (ok) state.rpcOk = true
 }
 
 function deriveGas(s: NodeStatusState): GasStatus {
@@ -118,26 +102,18 @@ function deriveSettler(s: NodeStatusState, now: number): SettlerStatus {
   return now - last > SETTLER_STALE_MS ? 'stalled' : 'running'
 }
 
-function deriveWatcher(s: NodeStatusState, now: number): WatcherStatus {
-  if (!s.enabled) return 'disabled'
-  const last = s.watcherLastTickAt ?? s.startedAt
-  if (now - last > WATCHER_STALE_MS) return 'stalled'
-  return s.watcherErroring ? 'lagging' : 'synced'
-}
-
 function rollup(
   s: NodeStatusState,
   gas: GasStatus,
   rpc: RpcStatus,
   settler: SettlerStatus,
-  watcher: WatcherStatus,
 ): OverallStatus {
   // `offline` before the first balance read is boot warm-up (degraded), not
   // an outage; `offline` after a real reading means RPC is down.
   const gasNeverRead = s.balanceAt === null
   const gasDown = gas === 'critical' || (gas === 'offline' && !gasNeverRead)
-  if (gasDown || rpc === 'down' || settler === 'stalled' || watcher === 'stalled') return 'down'
-  if (gas === 'warning' || watcher === 'lagging' || (gas === 'offline' && gasNeverRead)) {
+  if (gasDown || rpc === 'down' || settler === 'stalled') return 'down'
+  if (gas === 'warning' || (gas === 'offline' && gasNeverRead)) {
     return 'degraded'
   }
   return 'ok'
@@ -159,22 +135,19 @@ export function deriveHealth(s: NodeStatusState, now: number): HealthReport {
       gas: 'offline',
       rpc: 'down',
       settler: 'disabled',
-      watcher: 'disabled',
     }
   }
   const gas = deriveGas(s)
   const rpc: RpcStatus = s.rpcOk ? 'ok' : 'down'
   const settler = deriveSettler(s, now)
-  const watcher = deriveWatcher(s, now)
   return {
-    status: rollup(s, gas, rpc, settler, watcher),
+    status: rollup(s, gas, rpc, settler),
     version: VERSION,
     uptime_seconds: uptime,
     chain: s.chain,
     gas,
     rpc,
     settler,
-    watcher,
   }
 }
 

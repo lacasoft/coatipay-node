@@ -26,28 +26,13 @@ const ConfigSchema = z.object({
   nodeRegistryAddress: z.string().default('0x0000000000000000000000000000000000000000'),
   stakeManagerAddress: z.string().default('0x0000000000000000000000000000000000000000'),
   /// SettlementHub address — daemon calls registerIntent (lazy, on first
-  /// claim) and payIntentWithAuthorization in the settler service, plus
-  /// subscribes to IntentSettled events in the watcher. Zero in dev.
+  /// claim) and payIntentWithAuthorization in the settler service. Zero in dev.
   settlementHubAddress: z.string().default('0x0000000000000000000000000000000000000000'),
   usdcAddress: z.string().default('0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
   /// Internal API base URL (where /v1/internal/* endpoints live). Read from
   /// API_INTERNAL_URL. Default `http://api:3000` matches the docker-compose
   /// service name; override to localhost for non-docker dev.
   apiUrl: z.string().url().default('http://api:3000'),
-
-  // ── SettlementEventWatcher tuning ──────────────────────────────
-  /// Max block span per `eth_getLogs` when scanning for IntentSettled.
-  /// MUST fit the RPC provider's limit — Alchemy's free tier caps
-  /// eth_getLogs at 10 blocks, so the default 9 stays safely under it.
-  /// Raise it on a provider without that cap (public RPC, paid tier) to
-  /// catch up faster. EVENT_MAX_BLOCK_RANGE.
-  eventMaxBlockRange: z.coerce.number().int().positive().default(9),
-  /// How often the watcher polls for new blocks. EVENT_POLL_INTERVAL_MS.
-  eventPollIntervalMs: z.coerce.number().int().positive().default(4000),
-  /// On first boot, how many blocks back from head to start scanning, so
-  /// we don't replay all of history but still catch a settlement that
-  /// landed just before the daemon started. EVENT_LOOKBACK_BLOCKS.
-  eventLookbackBlocks: z.coerce.number().int().nonnegative().default(2000),
 
   // ── Settlement economics (never settle at a loss) ──────────────
   /// Minimum payment value (USDC base units) worth settling at the reference
@@ -79,9 +64,6 @@ export function loadConfig(): Config {
     settlementHubAddress: process.env.SETTLEMENT_HUB_ADDRESS,
     usdcAddress: process.env.USDC_ADDRESS,
     apiUrl: process.env.API_INTERNAL_URL,
-    eventMaxBlockRange: process.env.EVENT_MAX_BLOCK_RANGE,
-    eventPollIntervalMs: process.env.EVENT_POLL_INTERVAL_MS,
-    eventLookbackBlocks: process.env.EVENT_LOOKBACK_BLOCKS,
     minPaymentAmount: process.env.MIN_PAYMENT_AMOUNT,
     gasPriceRefGwei: process.env.GAS_PRICE_REF_GWEI,
     settleExpiryBufferSeconds: process.env.SETTLE_EXPIRY_BUFFER_SECONDS,

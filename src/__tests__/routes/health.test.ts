@@ -16,9 +16,6 @@ const mockConfig = {
   settlementHubAddress: '0x0000000000000000000000000000000000000000',
   usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
   apiUrl: 'http://localhost:3000',
-  eventMaxBlockRange: 9,
-  eventPollIntervalMs: 4000,
-  eventLookbackBlocks: 2000,
   minPaymentAmount: 0,
   gasPriceRefGwei: 0.02,
   settleExpiryBufferSeconds: 300,
@@ -56,14 +53,13 @@ describe('GET /health (public — coarse node health buckets)', () => {
     expect(body.operator).toBeUndefined()
   })
 
-  it('exposes coarse subsystem buckets (gas / rpc / settler / watcher)', async () => {
+  it('exposes coarse subsystem buckets (gas / rpc / settler)', async () => {
     // initNodeStatus() isn't called in this route-only test, so the daemon
     // reads as disabled (dev): services `disabled`, but every bucket present.
     const response = await app.inject({ method: 'GET', url: '/health' })
     const body = response.json()
     expect(body).toMatchObject({
       settler: 'disabled',
-      watcher: 'disabled',
       gas: 'offline',
       rpc: 'down',
     })
