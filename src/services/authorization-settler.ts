@@ -94,6 +94,18 @@ interface ClaimResponse {
     expires_at: string
     on_chain_id: Hex | null
   }
+  /**
+   * Registro autorizado por el API (ADR-004). Se envía a `registerIntent` tal
+   * como llega: cualquier alteración invalida la firma y el contrato revierte.
+   */
+  registration: {
+    intent_id: Hex
+    merchant: Address
+    operator: Address
+    amount: string
+    expires_at: string
+    signature: Hex
+  }
 }
 
 /**
@@ -175,6 +187,9 @@ export function startAuthorizationSettler(
 /// Conservative default: an unrecognized error is treated as transient —
 /// better to retry than to permanently kill a valid authorization.
 function isPermanentError(err: unknown): boolean {
+  // Refused by the deploy policy before anything was sent: retrying the same
+  // authorization would be refused again, identically.
+  if (err instanceof DeployPolicyError) return true
   // Our own signal: the tx mined and reverted (see registerIntent /
   // submitPayment). Retrying the same authorization is futile.
   if (err instanceof Error && err.message.includes('_reverted:')) return true
@@ -346,6 +361,17 @@ async function settleSingle(ctx: SettlerContext, claimed: ClaimResponse): Promis
 
   ctx.logger.info({ auth_id: authId, intent_id: intentId }, '[settler] Claimed authorization')
 
+  // Policy first: a refused authorization must not cost an intent registration.
+  const refusal = deployPolicyRefusal(claimed.authorization.signature)
+  if (refusal) {
+    ctx.logger.warn(
+      { auth_id: authId, intent_id: intentId, reason: refusal },
+      '[settler] Refused by deploy policy',
+    )
+    await rejectAuthorization(ctx, authId, refusal)
+    return
+  }
+
   try {
     // ── Lazy registerIntent if needed ─────────────────────────────
     const onChainId = await ensureIntentRegistered(ctx, claimed)
@@ -404,31 +430,58 @@ async function settleSingle(ctx: SettlerContext, claimed: ClaimResponse): Promis
 /// payIntentBatchWithAuthorization tx. Gas amortization for x402
 /// micropayments.
 ///
-/// Error policy (per the batch design): the batch path does NOT reject
-/// authorizations individually. On ANY failure we log and return,
-/// leaving every row `claimed`. The API sweeper re-queues them after the
-/// claim timeout; retries are bounded by each authorization's
-/// validBefore. Individual rejection inside a batch is a future
-/// refinement, out of scope here.
-async function settleBatch(ctx: SettlerContext, claimedList: ClaimResponse[]): Promise<void> {
-  ctx.logger.info({ count: claimedList.length }, '[settler] Claimed authorization batch')
+/// Error policy (per the batch design): an on-chain failure of the batch does
+/// NOT reject authorizations individually. We log and return, leaving every
+/// row `claimed`. The API sweeper re-queues them after the claim timeout;
+/// retries are bounded by each authorization's validBefore.
+///
+/// The one exception runs BEFORE any transaction: an authorization refused by
+/// the ERC-6492 deploy policy is rejected on its own and dropped from the
+/// batch. Its refusal is permanent, so leaving it in would sink every batch it
+/// is re-queued into.
+async function settleBatch(ctx: SettlerContext, claimed: ClaimResponse[]): Promise<void> {
+  ctx.logger.info({ count: claimed.length }, '[settler] Claimed authorization batch')
+
+  // Policy first, per item. The batch catch below re-queues EVERY row on
+  // failure, so a single refused authorization left in the batch would sink it
+  // on every retry until the legitimate authorizations beside it expired.
+  const claimedList: ClaimResponse[] = []
+  for (const c of claimed) {
+    const refusal = deployPolicyRefusal(c.authorization.signature)
+    if (refusal) {
+      ctx.logger.warn(
+        { auth_id: c.authorization.id, intent_id: c.intent.intent_id, reason: refusal },
+        '[settler] Refused by deploy policy — removed from batch',
+      )
+      await rejectAuthorization(ctx, c.authorization.id, refusal)
+    } else {
+      claimedList.push(c)
+    }
+  }
+  if (claimedList.length === 0) return
 
   try {
     // ── Register intents not yet on-chain (single batch tx) ───────
     const needRegister = claimedList.filter((c) => c.intent.on_chain_id == null)
 
     if (needRegister.length > 0) {
-      const intentIds = needRegister.map((c) => intentIdToBytes32(c.intent.intent_id))
-      const merchants = needRegister.map((c) => c.intent.merchant_address)
-      const operators = needRegister.map(() => ctx.config.operatorAddress as Address)
-      const amounts = needRegister.map((c) => BigInt(c.intent.amount))
-      const expirations = needRegister.map((c) => BigInt(c.intent.expires_at))
+      // Los registros llegan firmados por el API (ADR-004): se envían tal
+      // cual, sin reconstruirlos desde la configuración local.
+      const regs = needRegister.map((c) => ({
+        intentId: c.registration.intent_id,
+        merchant: c.registration.merchant,
+        operator: c.registration.operator,
+        amount: BigInt(c.registration.amount),
+        expiresAt: BigInt(c.registration.expires_at),
+        signature: c.registration.signature,
+      }))
+      const intentIds = regs.map((r) => r.intentId)
 
       const regTxHash = await ctx.hubClients.walletClient.writeContract({
         address: ctx.hubClients.settlementHubAddress,
         abi: SETTLEMENT_HUB_ABI,
         functionName: 'registerIntentBatch',
-        args: [intentIds, merchants, operators, amounts, expirations],
+        args: [regs],
         account: ctx.hubClients.account,
         chain: null,
       })
@@ -638,12 +691,19 @@ async function ensureIntentRegistered(ctx: SettlerContext, claimed: ClaimRespons
     address: ctx.hubClients.settlementHubAddress,
     abi: SETTLEMENT_HUB_ABI,
     functionName: 'registerIntent',
+    // El registro llega FIRMADO por el API (ADR-004) y se envía tal cual. No se
+    // reconstruye desde la configuración local: si el daemon alterara cualquier
+    // campo —la dirección del comercio, sin ir más lejos— el contrato lo
+    // rechazaría, que es justamente el punto.
     args: [
-      onChainId,
-      claimed.intent.merchant_address,
-      ctx.config.operatorAddress as Address,
-      BigInt(claimed.intent.amount),
-      BigInt(claimed.intent.expires_at),
+      {
+        intentId: claimed.registration.intent_id,
+        merchant: claimed.registration.merchant as Address,
+        operator: claimed.registration.operator as Address,
+        amount: BigInt(claimed.registration.amount),
+        expiresAt: BigInt(claimed.registration.expires_at),
+        signature: claimed.registration.signature as `0x${string}`,
+      },
     ],
     account: ctx.hubClients.account,
     chain: null,
@@ -734,12 +794,64 @@ const MULTICALL3_ADDRESS = '0xca11bde05977b3631167028862be2a173976ca11'
 /// `aggregate3((address target, bool allowFailure, bytes callData)[])` selector.
 const AGGREGATE3_SELECTOR = '0x82ad56cb'
 
-/// Turn an ERC-6492 (factory, factoryCalldata) into the concrete deploy call(s).
+/// Smart-wallet factories this node agrees to call, and the only function it
+/// agrees to call on them. Every deploy call — after unwrapping Multicall3 —
+/// must match BOTH, or nothing is sent.
+///
+/// Why this is not optional: the (factory, calldata) pair comes from the payer's
+/// signature, and the node sends it FROM ITS OWN ACCOUNT. Without this check a
+/// "payer" could name USDC as the factory and `transfer(attacker, …)` as the
+/// calldata, and the node would move its own funds. Verifying the signature is
+/// not enough on its own: a Multicall3 aggregate can bundle a legitimate
+/// `createAccount` (which makes the signature valid) with a harmful call.
+///
+/// CoinbaseSmartWalletFactory, both released versions — verified on-chain: each
+/// has the same bytecode on Base and Base Sepolia, and `createAccount(owners,
+/// nonce)` returns the same address as `getAddress(owners, nonce)`. Other
+/// factories (Safe, …) are not accepted until verified the same way.
+const ALLOWED_WALLET_FACTORIES: ReadonlySet<string> = new Set([
+  '0x0ba5ed0c6aa8c49038f819e587e2633c4a9f428a', // v1
+  '0xba5ed110efdba3d005bfc882d75358acbbb85842', // v1.1
+])
+/// `createAccount(bytes[] owners, uint256 nonce)`.
+const CREATE_ACCOUNT_SELECTOR = '0x3ffba36f'
+
+/// A deploy call that the node refuses to send. Permanent: the same
+/// authorization would be refused again.
+export class DeployPolicyError extends Error {
+  constructor(reason: string) {
+    super(`erc6492_deploy_refused: ${reason}`)
+    this.name = 'DeployPolicyError'
+  }
+}
+
+/// Turn an ERC-6492 (factory, factoryCalldata) into the concrete deploy call(s),
+/// refusing anything but an allowed factory's `createAccount`.
+///
 /// Coinbase wraps the deploy in `Multicall3.aggregate3`, whose `allowFailure`
 /// SWALLOWS inner reverts — calling it blindly can "succeed" without deploying.
 /// So when the factory is Multicall3 we unwrap the aggregate and return the inner
 /// (target, callData) calls, which we then send DIRECTLY so any revert surfaces.
+/// Sending them directly is also what makes the node `msg.sender` — hence the
+/// allowlist below is checked on the UNWRAPPED calls, never on the wrapper.
 function deployCallsFromWrapper(
+  factory: Address,
+  factoryCalldata: Hex,
+): Array<{ to: Address; data: Hex }> {
+  const calls = unwrapDeployCalls(factory, factoryCalldata)
+  if (calls.length === 0) throw new DeployPolicyError('no deploy calls')
+  for (const call of calls) {
+    if (!ALLOWED_WALLET_FACTORIES.has(call.to.toLowerCase())) {
+      throw new DeployPolicyError(`factory not allowed: ${call.to}`)
+    }
+    if (!call.data.toLowerCase().startsWith(CREATE_ACCOUNT_SELECTOR)) {
+      throw new DeployPolicyError(`function not allowed on ${call.to}: ${call.data.slice(0, 10)}`)
+    }
+  }
+  return calls
+}
+
+function unwrapDeployCalls(
   factory: Address,
   factoryCalldata: Hex,
 ): Array<{ to: Address; data: Hex }> {
@@ -747,22 +859,51 @@ function deployCallsFromWrapper(
     factory.toLowerCase() === MULTICALL3_ADDRESS &&
     factoryCalldata.toLowerCase().startsWith(AGGREGATE3_SELECTOR)
   ) {
-    const [calls] = decodeAbiParameters(
-      [
-        {
-          type: 'tuple[]',
-          components: [
-            { name: 'target', type: 'address' },
-            { name: 'allowFailure', type: 'bool' },
-            { name: 'callData', type: 'bytes' },
-          ],
-        },
-      ],
-      `0x${factoryCalldata.slice(10)}` as Hex,
-    ) as readonly [readonly { target: Address; allowFailure: boolean; callData: Hex }[]]
+    let calls: readonly { target: Address; allowFailure: boolean; callData: Hex }[]
+    try {
+      ;[calls] = decodeAbiParameters(
+        [
+          {
+            type: 'tuple[]',
+            components: [
+              { name: 'target', type: 'address' },
+              { name: 'allowFailure', type: 'bool' },
+              { name: 'callData', type: 'bytes' },
+            ],
+          },
+        ],
+        `0x${factoryCalldata.slice(10)}` as Hex,
+      ) as readonly [readonly { target: Address; allowFailure: boolean; callData: Hex }[]]
+    } catch {
+      // Unparseable wrapper: refuse permanently instead of letting a decode
+      // error look transient and get retried until the authorization expires.
+      throw new DeployPolicyError('malformed aggregate3 wrapper')
+    }
     return calls.map((c) => ({ to: c.target, data: c.callData }))
   }
   return [{ to: factory, data: factoryCalldata }]
+}
+
+/// Applies the deploy policy to a signature WITHOUT touching the chain.
+/// Returns null when acceptable, or the refusal reason.
+///
+/// Run before any on-chain action for an authorization, so a refused one costs
+/// no gas (no intent registration) and — in a batch — cannot take the rest of
+/// the batch down with it.
+function deployPolicyRefusal(signature: Hex): string | null {
+  if (!signature.toLowerCase().endsWith(ERC6492_MAGIC_SUFFIX)) return null
+  try {
+    const wrapped = signature.slice(0, signature.length - 64) as Hex
+    const [factory, factoryCalldata] = decodeAbiParameters(
+      [{ type: 'address' }, { type: 'bytes' }, { type: 'bytes' }],
+      wrapped,
+    ) as [Address, Hex, Hex]
+    deployCallsFromWrapper(factory, factoryCalldata)
+    return null
+  } catch (err) {
+    if (err instanceof DeployPolicyError) return err.message
+    return 'erc6492_deploy_refused: malformed ERC-6492 wrapper'
+  }
 }
 
 async function resolveSettlementSignature(
