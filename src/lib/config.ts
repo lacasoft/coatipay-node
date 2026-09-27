@@ -16,7 +16,9 @@ const ConfigSchema = z
     port: z.coerce.number().default(4000),
     /// Red en la que opera el nodo, declarada — no deducida del texto de la URL
     /// del RPC. Al arrancar se comprueba que cada RPC sirve esa red. CHAIN.
-    chain: z.enum(['base', 'base-sepolia']),
+    chain: z.enum(['base', 'base-sepolia'], {
+      required_error: 'declara la red: base-sepolia o base',
+    }),
     /// NODE_ENV=production. En producción no hay «modo dev»: una dirección de
     /// contrato o una clave a cero es un error de configuración, no un permiso
     /// para arrancar sin liquidar.
@@ -110,15 +112,24 @@ const ConfigSchema = z
 
 export type Config = z.infer<typeof ConfigSchema>
 
-const VARIABLES: Record<string, string> = {
+/// La variable de entorno de cada campo, para los mensajes de error. El tipo
+/// obliga a que estén todos: un campo nuevo sin su variable no compila.
+const VARIABLES: Record<keyof z.input<typeof ConfigSchema>, string> = {
+  port: 'PORT',
   chain: 'CHAIN',
+  isProduction: 'NODE_ENV',
   operatorAddress: 'NODE_OPERATOR_ADDRESS',
   privateKey: 'NODE_OPERATOR_PRIVATE_KEY',
+  endpoint: 'NODE_ENDPOINT',
   baseRpcUrl: 'BASE_RPC_URL',
-  settlementHubAddress: 'SETTLEMENT_HUB_ADDRESS',
+  baseRpcFallbackUrls: 'BASE_RPC_FALLBACK_URLS',
   nodeRegistryAddress: 'NODE_REGISTRY_ADDRESS',
+  settlementHubAddress: 'SETTLEMENT_HUB_ADDRESS',
   usdcAddress: 'USDC_ADDRESS',
   apiUrl: 'API_INTERNAL_URL',
+  minPaymentAmount: 'MIN_PAYMENT_AMOUNT',
+  gasPriceRefGwei: 'GAS_PRICE_REF_GWEI',
+  settleExpiryBufferSeconds: 'SETTLE_EXPIRY_BUFFER_SECONDS',
 }
 
 /// Carga la configuración. Si algo está mal, no arranca y lo dice nombrando la
@@ -148,7 +159,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (!resultado.success) {
     const problemas = resultado.error.issues.map((i) => {
       const campo = String(i.path[0] ?? '(raíz)')
-      return `  ${VARIABLES[campo] ?? campo}: ${i.message}`
+      return `  ${VARIABLES[campo as keyof typeof VARIABLES] ?? campo}: ${i.message}`
     })
     throw new Error(
       `Configuración del nodo inválida — el nodo no arranca:\n${problemas.join('\n')}`,

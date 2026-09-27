@@ -111,3 +111,39 @@ describe('loadConfig — el USDC sale de la red', () => {
     )
   })
 })
+
+describe('loadConfig — los errores nombran la variable de entorno', () => {
+  it('sin CHAIN, dice qué valores admite', () => {
+    expect(() => loadConfig(produccion({ CHAIN: undefined }))).toThrow(
+      /CHAIN: declara la red: base-sepolia o base/,
+    )
+  })
+
+  it('cada campo inválido sale con su variable, no con la clave interna', () => {
+    // Pasó con Docker --env-file: un comentario al final de la línea llegó como
+    // parte del valor, y el error decía «minPaymentAmount».
+    const todoMal = produccion({
+      PORT: 'x',
+      CHAIN: 'x',
+      NODE_OPERATOR_PRIVATE_KEY: 'x',
+      BASE_RPC_URL: 'x',
+      BASE_RPC_FALLBACK_URLS: 'x',
+      API_INTERNAL_URL: 'x',
+      MIN_PAYMENT_AMOUNT: '300000          # 0.30 USDC',
+      GAS_PRICE_REF_GWEI: 'x',
+      SETTLE_EXPIRY_BUFFER_SECONDS: 'x',
+    })
+    const mensaje = (() => {
+      try {
+        loadConfig(todoMal)
+        return ''
+      } catch (e) {
+        return (e as Error).message
+      }
+    })()
+    const lineas = mensaje.split('\n').slice(1)
+    expect(lineas.length).toBeGreaterThanOrEqual(9)
+    for (const linea of lineas) expect(linea).toMatch(/^ {2}[A-Z_]+: /)
+    expect(mensaje).toContain('MIN_PAYMENT_AMOUNT:')
+  })
+})
