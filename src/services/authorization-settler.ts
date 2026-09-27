@@ -8,16 +8,14 @@
 // Lifecycle of one cycle:
 //   1. Claim next queued authorization (atomic via API; receives auth
 //      fields + intent fields in one round-trip).
-//   2. If intent.on_chain_id is null → lazy register:
-//      - Call SettlementHub.getIntent(idBytes32) (cheap view, double-check
-//        not registered by a concurrent worker).
-//      - If still not registered, call registerIntent on-chain.
-//      - Wait for receipt.
-//      - Call API /intents/:id/registered to persist on_chain_id.
+//   2. Lazy register: read SettlementHub.getIntent(idBytes32) (cheap view).
+//      If the chain does not have it yet, send the API-signed registration
+//      (registerIntent) and wait for the receipt. The chain is the only
+//      source for "is it registered" — the API is not told about it.
 //   3. Submit payIntentWithAuthorization.
-//   4. Exit cycle — DO NOT call back to mark settled. The
-//      SettlementEventWatcher catches the IntentSettled event and is the
-//      source of truth for settlement state + webhooks.
+//   4. Exit cycle — DO NOT report back that it settled. The API reads the
+//      IntentSettled event itself (its settlement reconciler) and does not
+//      take a node's word for it (F-5, ADR-007).
 //
 // On failure: permanent errors (contract revert — bad signature, nonce
 // reused, intent not payable) → call API /authorizations/:id/rejected; the
@@ -43,7 +41,7 @@ import {
 } from 'viem'
 import { type DaemonChainClients, isDevChainConfig } from '../lib/chain-client'
 import type { Config } from '../lib/config'
-import { type InternalApiClient, InternalApiError } from '../lib/internal-api-client'
+import type { InternalApiClient } from '../lib/internal-api-client'
 import {
   GAS_CRITICAL_WEI,
   markSettlerTick,
@@ -383,8 +381,8 @@ async function settleSingle(ctx: SettlerContext, claimed: ClaimResponse): Promis
       { auth_id: authId, intent_id: intentId, on_chain_id: onChainId },
       '[settler] Submitted on-chain — awaiting IntentSettled event for state update',
     )
-    // Note: we DO NOT call API to mark settled. The SettlementEventWatcher
-    // catches the on-chain event and is the source of truth.
+    // Note: we DO NOT tell the API it settled. The API reads the
+    // IntentSettled event itself (settlement reconciler, F-5).
   } catch (err) {
     const reason = err instanceof Error ? err.message : 'unknown'
 
@@ -462,7 +460,22 @@ async function settleBatch(ctx: SettlerContext, claimed: ClaimResponse[]): Promi
 
   try {
     // ── Register intents not yet on-chain (single batch tx) ───────
-    const needRegister = claimedList.filter((c) => c.intent.on_chain_id == null)
+    // Se pregunta a la cadena, no a la API: la API rellena on_chain_id al
+    // crear el intent, así que «tiene on_chain_id» ya no significa
+    // «está registrado». Y aunque lo significara, solo la cadena lo sabe.
+    const registrados = await Promise.all(
+      claimedList.map((c) =>
+        ctx.hubClients.publicClient.readContract({
+          address: ctx.hubClients.settlementHubAddress,
+          abi: SETTLEMENT_HUB_ABI,
+          functionName: 'getIntent',
+          args: [intentIdToBytes32(c.intent.intent_id)],
+        }),
+      ),
+    )
+    const needRegister = claimedList.filter(
+      (_, i) => (registrados[i] as { merchant: string }).merchant === ZERO_ADDRESS,
+    )
 
     if (needRegister.length > 0) {
       // Los registros llegan firmados por el API (ADR-004): se envían tal
@@ -498,16 +511,6 @@ async function settleBatch(ctx: SettlerContext, claimed: ClaimResponse[]): Promi
       // gap before payIntentBatchWithAuthorization estimates gas.
       const firstOnChainId = intentIds[0]
       if (firstOnChainId) await waitForIntentVisible(ctx, firstOnChainId)
-
-      // Persist on_chain_id for each — idempotent (API returns applied=false
-      // on race with another worker).
-      for (let i = 0; i < needRegister.length; i++) {
-        const claimed = needRegister[i]
-        const onChainId = intentIds[i]
-        if (claimed && onChainId) {
-          await persistOnChainIdSafe(ctx, claimed.intent.intent_id, onChainId)
-        }
-      }
 
       ctx.logger.info(
         { count: needRegister.length, tx_hash: regTxHash },
@@ -559,8 +562,8 @@ async function settleBatch(ctx: SettlerContext, claimed: ClaimResponse[]): Promi
     // Reconcile: the batch is skip-on-failure, so some auths may have been
     // skipped on-chain. Reject the permanently-bad ones (expired / nonce
     // already used) so they don't churn until expiry; leave transient ones
-    // claimed for the sweeper to re-drive. (Settled ones: the event-watcher
-    // is the source of truth for state — we don't mark them here.)
+    // claimed for the sweeper to re-drive. (Settled ones: the API's reconciler
+    // reads their IntentSettled event — we don't report them.)
     await reconcileBatchOutcome(ctx, claimedList, payReceipt)
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
@@ -591,7 +594,7 @@ const USDC_AUTH_STATE_ABI = [
 /// After a (skip-on-failure) batch tx, figure out which authorizations were
 /// skipped on-chain and act on each — read-only classification, NO re-simulation
 /// (which could trigger a counterfactual-wallet deploy):
-///   - settled (IntentSettled emitted)  → nothing (event-watcher owns state)
+///   - settled (IntentSettled emitted)  → nothing (the API's reconciler owns state)
 ///   - expired                          → reject (permanent)
 ///   - nonce already consumed on-chain  → reject (settled via another tx)
 ///   - otherwise                        → leave claimed (transient → sweeper retries)
@@ -610,14 +613,14 @@ async function reconcileBatchOutcome(
     })
     settledIds = new Set(logs.map((l) => (l.args as { intentId: Hex }).intentId.toLowerCase()))
   } catch {
-    // Can't parse logs — rely on the event-watcher + sweeper as before.
+    // Can't parse logs — the API's reconciler + the sweeper cover it.
     return
   }
 
   const now = Math.floor(Date.now() / 1000)
   for (const c of claimed) {
     const onChainId = intentIdToBytes32(c.intent.intent_id).toLowerCase()
-    if (settledIds.has(onChainId)) continue // settled — event-watcher confirms
+    if (settledIds.has(onChainId)) continue // settled — the API's reconciler records it
 
     // Skipped on-chain. Classify cheaply (reads only).
     if (Number(c.authorization.valid_before) <= now) {
@@ -657,16 +660,9 @@ async function reconcileBatchOutcome(
 }
 
 /// Ensures the intent is registered on-chain. Returns the bytes32 id used.
-/// Three paths:
-///   - Already in API DB (on_chain_id != null): just compute and verify
-///     locally; nothing to do on-chain.
-///   - In API DB but on-chain check shows it's not registered → register.
-///   - Not in API DB, also not on-chain → register + persist via API.
-///
-/// The on-chain getIntent check is a defensive read even when on_chain_id
-/// is set, to handle the edge case where the DB says "registered" but the
-/// chain was reorged (rare; ~impossible on Base with 1-block finality
-/// but cheap to defend against).
+/// The chain is asked (getIntent, a view call): if the intent is not there,
+/// the API-signed registration is sent. Nothing is reported to the API — it
+/// does not need to know, and would not take a node's word for it (F-5).
 async function ensureIntentRegistered(ctx: SettlerContext, claimed: ClaimResponse): Promise<Hex> {
   const onChainId = intentIdToBytes32(claimed.intent.intent_id)
 
@@ -679,10 +675,6 @@ async function ensureIntentRegistered(ctx: SettlerContext, claimed: ClaimRespons
   })
 
   if ((existing as { merchant: string }).merchant !== ZERO_ADDRESS) {
-    // Already on-chain. If DB doesn't know, persist (race recovery).
-    if (claimed.intent.on_chain_id == null) {
-      await persistOnChainIdSafe(ctx, claimed.intent.intent_id, onChainId)
-    }
     return onChainId
   }
 
@@ -720,10 +712,6 @@ async function ensureIntentRegistered(ctx: SettlerContext, claimed: ClaimRespons
   // registered intent is visible on the read path.
   await waitForIntentVisible(ctx, onChainId)
 
-  // Persist on_chain_id. Idempotent — another worker may have just done
-  // this; the API helper returns { applied: false } silently in that case.
-  await persistOnChainIdSafe(ctx, claimed.intent.intent_id, onChainId)
-
   ctx.logger.info(
     { intent_id: claimed.intent.intent_id, on_chain_id: onChainId, tx_hash: txHash },
     '[settler] registerIntent confirmed',
@@ -752,23 +740,6 @@ async function waitForIntentVisible(ctx: SettlerContext, onChainId: Hex): Promis
     }
   }
   throw new Error('registerIntent confirmed but intent not visible on read path after retries')
-}
-
-async function persistOnChainIdSafe(ctx: SettlerContext, intentId: string, onChainId: Hex) {
-  try {
-    await ctx.api.post(`/v1/internal/intents/${intentId}/registered`, { on_chain_id: onChainId })
-  } catch (err) {
-    // If the API rejects (e.g. unknown intent), we still continue — the
-    // bytes32 id is deterministic, so payment will work. Log for trail.
-    if (err instanceof InternalApiError && err.status === 404) {
-      ctx.logger.warn(
-        { intent_id: intentId, status: err.status },
-        '[settler] API rejected intent registration persistence — continuing with on-chain only',
-      )
-      return
-    }
-    throw err
-  }
 }
 
 // ERC-6492: a counterfactual (not-yet-deployed) smart-wallet signature is

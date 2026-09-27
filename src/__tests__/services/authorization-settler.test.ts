@@ -22,9 +22,6 @@ const baseConfig = {
   settlementHubAddress: HUB,
   usdcAddress: '0xUSDC',
   apiUrl: 'http://localhost:3000',
-  eventMaxBlockRange: 9,
-  eventPollIntervalMs: 4000,
-  eventLookbackBlocks: 2000,
   minPaymentAmount: 0, // floor disabled by default; specific tests override
   gasPriceRefGwei: 0.02,
   settleExpiryBufferSeconds: 300,
@@ -148,7 +145,7 @@ describe('startAuthorizationSettler', () => {
     stop()
   })
 
-  it('happy path: claim → registerIntent → submit → no callback (event watcher does the rest)', async () => {
+  it('happy path: claim → registerIntent → submit → no callback (the API reads the chain)', async () => {
     const hubClients = buildHubClients()
     // getIntent: not-registered on the pre-register check, then registered on
     // the waitForIntentVisible poll that follows registerIntent's receipt.
@@ -169,11 +166,10 @@ describe('startAuthorizationSettler', () => {
       })
     const { api, postCalls } = buildApiMock()
 
-    // Sequence of API responses:
-    //   call 1 = /claim-batch → returns one-element batch envelope
-    //   call 2 = /intents/:id/registered → returns null (ok)
+    // Sequence of API responses: only /claim-batch. Nothing is reported back —
+    // not the registration, not the settlement (F-5, ADR-007).
     let callIndex = 0
-    const responses = [batchOf(makeClaimResponse()), null] // claim-batch + registered
+    const responses = [batchOf(makeClaimResponse())]
     ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
       async (path: string, body: unknown) => {
         postCalls.push({ path, body })
@@ -210,11 +206,9 @@ describe('startAuthorizationSettler', () => {
     const payAuth = (writeCalls[1]![0] as { args: [{ signature: string }] }).args[0]
     expect(payAuth.signature).toBe(`0x${'ab'.repeat(65)}`)
 
-    // API calls: claim-batch + intents/registered (NO settled callback)
-    expect(postCalls.map((c) => c.path)).toEqual([
-      '/v1/internal/authorizations/claim-batch',
-      '/v1/internal/intents/pi_test/registered',
-    ])
+    // API calls: only the claim. The node reports neither the registration
+    // nor the settlement — the API reads both from the chain (F-5).
+    expect(postCalls.map((c) => c.path)).toEqual(['/v1/internal/authorizations/claim-batch'])
   })
 
   it('skips registerIntent when intent already on-chain', async () => {
@@ -267,8 +261,8 @@ describe('startAuthorizationSettler', () => {
       ).functionName,
     ).toBe('payIntentWithAuthorization')
 
-    // API path: only claim + on_chain_id race recovery (since DB had null)
-    expect(postCalls.some((c) => c.path === '/v1/internal/intents/pi_test/registered')).toBe(true)
+    // API path: only the claim. Nothing about the registration is reported.
+    expect(postCalls.map((c) => c.path)).toEqual(['/v1/internal/authorizations/claim-batch'])
   })
 
   it('ERC-6492: deploys the counterfactual wallet, then settles with the inner sig', async () => {
@@ -629,13 +623,25 @@ describe('startAuthorizationSettler', () => {
     const hubClients = buildHubClients()
     // getIntent: not-registered on the pre-check, registered afterwards on the
     // waitForIntentVisible poll.
-    ;(hubClients.publicClient.readContract as ReturnType<typeof vi.fn>).mockResolvedValue({
-      merchant: MERCHANT,
+    // Lo que decide qué registrar es la cadena: los dos getIntent previos
+    // dicen «no está», y el sondeo tras el registro, que ya está.
+    const noRegistrado = {
+      merchant: '0x0000000000000000000000000000000000000000',
       amount: 0n,
-      operator: OPERATOR,
+      operator: '0x0000000000000000000000000000000000000000',
       expiresAt: 0n,
       status: 0,
-    })
+    }
+    ;(hubClients.publicClient.readContract as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(noRegistrado)
+      .mockResolvedValueOnce(noRegistrado)
+      .mockResolvedValue({
+        merchant: MERCHANT,
+        amount: 0n,
+        operator: OPERATOR,
+        expiresAt: 0n,
+        status: 0,
+      })
     const { api, postCalls } = buildApiMock()
     let callIndex = 0
     const responses = [
@@ -643,8 +649,6 @@ describe('startAuthorizationSettler', () => {
         makeClaimResponse({ id: 'pa_1', intentId: 'pi_1' }),
         makeClaimResponse({ id: 'pa_2', intentId: 'pi_2' }),
       ),
-      null, // intents/pi_1/registered
-      null, // intents/pi_2/registered
     ]
     ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
       async (path: string, body: unknown) => {
@@ -687,8 +691,71 @@ describe('startAuthorizationSettler', () => {
     expect(postCalls.some((c) => c.path.includes('/rejected'))).toBe(false)
   })
 
+  it('batch path: registra aunque el claim traiga on_chain_id, si la cadena no tiene el intent', async () => {
+    // Desde F-5 la API rellena on_chain_id al crear el intent: ya no significa
+    // «registrado». Si el settler decidiera por él, nunca registraría nada y
+    // cada lote revertiría con IntentNotFound.
+    const hubClients = buildHubClients()
+    const noRegistrado = {
+      merchant: '0x0000000000000000000000000000000000000000',
+      amount: 0n,
+      operator: '0x0000000000000000000000000000000000000000',
+      expiresAt: 0n,
+      status: 0,
+    }
+    ;(hubClients.publicClient.readContract as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(noRegistrado)
+      .mockResolvedValueOnce(noRegistrado)
+      .mockResolvedValue({
+        merchant: MERCHANT,
+        amount: 0n,
+        operator: OPERATOR,
+        expiresAt: 0n,
+        status: 0,
+      })
+    const { api, postCalls } = buildApiMock()
+    let entregado = false
+    ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
+      async (path: string, body: unknown) => {
+        postCalls.push({ path, body })
+        if (entregado) return null
+        entregado = true
+        return batchOf(
+          makeClaimResponse({ id: 'pa_1', intentId: 'pi_1', onChainId: intentIdToBytes32('pi_1') }),
+          makeClaimResponse({ id: 'pa_2', intentId: 'pi_2', onChainId: intentIdToBytes32('pi_2') }),
+        )
+      },
+    )
+    ;(hubClients.walletClient.writeContract as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce('0xreg' as Hex)
+      .mockResolvedValueOnce('0xpay' as Hex)
+
+    const stop = startAuthorizationSettler({
+      config: baseConfig,
+      hubClients,
+      api,
+      logger: mockLogger as never,
+    })
+    await vi.advanceTimersByTimeAsync(5_001)
+    for (let k = 0; k < 4; k++) await Promise.resolve()
+    stop()
+
+    const funciones = (
+      hubClients.walletClient.writeContract as ReturnType<typeof vi.fn>
+    ).mock.calls.map((c) => (c[0] as { functionName: string }).functionName)
+    expect(funciones).toEqual(['registerIntentBatch', 'payIntentBatchWithAuthorization'])
+  })
+
   it('batch path: skips registerIntentBatch when all intents already on-chain', async () => {
     const hubClients = buildHubClients()
+    // «Ya en la cadena» lo dice getIntent, no el on_chain_id del claim.
+    ;(hubClients.publicClient.readContract as ReturnType<typeof vi.fn>).mockResolvedValue({
+      merchant: MERCHANT,
+      amount: 5_000_000n,
+      operator: OPERATOR,
+      expiresAt: 9999999999n,
+      status: 0,
+    })
     const { api, postCalls } = buildApiMock()
     ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
       async (path: string, body: unknown) => {

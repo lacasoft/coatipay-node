@@ -8,7 +8,6 @@ import { healthRoute, infoRoute } from './routes/health'
 import { startAuthorizationSettler } from './services/authorization-settler'
 import { preflight } from './services/preflight'
 import { verifyRegistration } from './services/registry'
-import { startSettlementEventWatcher } from './services/settlement-event-watcher'
 
 const config = loadConfig()
 
@@ -40,8 +39,7 @@ async function start() {
   await verifyRegistration(config, app.log)
 
   // ── ADR-003 Phase B4: ERC-3009 settlement services ──────────────
-  // Create chain clients (null in dev) + API client (used by both
-  // settler and event-watcher).
+  // Create chain clients (null in dev) + API client (used by the settler).
   const hubClients = isDevChainConfig(config.settlementHubAddress)
     ? null
     : createDaemonChainClients({
@@ -65,7 +63,7 @@ async function start() {
   const api = new InternalApiClient({ apiUrl: config.apiUrl, privateKey: config.privateKey })
 
   // Seed the /health snapshot. `enabled=false` in dev (no SettlementHub) →
-  // /health reports the settler/watcher as `disabled` rather than `stalled`.
+  // /health reports the settler as `disabled` rather than `stalled`.
   initNodeStatus({ enabled: hubClients !== null, chain: hubClients?.chainName ?? 'dev' })
 
   // Settler (write path): polls API queue → submits payIntentWithAuth on-chain.
@@ -77,15 +75,8 @@ async function start() {
   })
   app.addHook('onClose', () => stopSettler())
 
-  // Event watcher (read path / source of truth): subscribes to IntentSettled
-  // events from SettlementHub → calls API to update intent + fire webhook.
-  const stopEventWatcher = startSettlementEventWatcher({
-    config,
-    hubClients,
-    api,
-    logger: app.log,
-  })
-  app.addHook('onClose', () => stopEventWatcher())
+  // No event watcher: the API reads IntentSettled from the hub itself and
+  // does not take a node's word for what settled (F-5, ADR-007).
 
   await app.listen({ port: config.port, host: '0.0.0.0' })
   app.log.info('CoatiPay Node v0.1.0')

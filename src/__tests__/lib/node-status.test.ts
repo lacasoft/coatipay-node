@@ -19,8 +19,6 @@ function healthyState(overrides: Partial<NodeStatusState> = {}): NodeStatusState
     balanceAt: NOW - 5_000,
     rpcOk: true,
     settlerLastTickAt: NOW - 5_000,
-    watcherLastTickAt: NOW - 4_000,
-    watcherErroring: false,
     ...overrides,
   }
 }
@@ -34,7 +32,6 @@ describe('deriveHealth', () => {
       gas: 'healthy',
       rpc: 'ok',
       settler: 'running',
-      watcher: 'synced',
       version: '0.1.0',
     })
     expect(h.uptime_seconds).toBe(60)
@@ -66,16 +63,10 @@ describe('deriveHealth', () => {
     expect(h.status).toBe('down')
   })
 
-  it('watcher → stalled when no poll within the staleness window (down)', () => {
-    const h = deriveHealth(healthyState({ watcherLastTickAt: NOW - 90_000 }), NOW)
-    expect(h.watcher).toBe('stalled')
-    expect(h.status).toBe('down')
-  })
-
-  it('watcher → lagging when the last poll errored but the loop is alive (degraded)', () => {
-    const h = deriveHealth(healthyState({ watcherErroring: true }), NOW)
-    expect(h.watcher).toBe('lagging')
-    expect(h.status).toBe('degraded')
+  it('no reporta un watcher: el nodo ya no vigila eventos (F-5, ADR-007)', () => {
+    // Registrar lo que se pagó es trabajo de la API, que lee la cadena ella
+    // misma. Un campo `watcher` aquí prometería algo que el nodo no hace.
+    expect(deriveHealth(healthyState(), NOW)).not.toHaveProperty('watcher')
   })
 
   it('boot warm-up: no balance read yet is degraded, not down', () => {
@@ -91,7 +82,6 @@ describe('deriveHealth', () => {
       status: 'ok',
       chain: 'dev',
       settler: 'disabled',
-      watcher: 'disabled',
       gas: 'offline',
       rpc: 'down',
     })
@@ -103,13 +93,11 @@ describe('deriveHealth', () => {
       healthyState({
         startedAt: NOW - 5_000,
         settlerLastTickAt: null,
-        watcherLastTickAt: null,
         balanceWei: null,
         balanceAt: null,
       }),
       NOW,
     )
     expect(h.settler).toBe('running')
-    expect(h.watcher).toBe('synced')
   })
 })
