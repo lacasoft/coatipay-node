@@ -84,7 +84,7 @@ docker run -d --name coatipay-node \
 curl https://nodeit.tudominio.com/health
 ```
 
-Debe responder `settler: running` y `watcher: synced`. Aparecerás en
+Debe responder `status: ok` y `settler: running`. Aparecerás en
 `GET /v1/nodes` del API.
 
 > **`/health` no basta para saber si estás liquidando.** El proceso puede estar
@@ -115,8 +115,12 @@ debajo del mínimo, **el API deja de darte trabajo** aunque sigas registrado.
 |---|---|
 | **Preflight** | Al arrancar comprueba que el hub configurado es el actual y que tu operador está activo en el registro. Si no, no arranca, y dice por qué |
 | **Settler** | Toma autorizaciones de la cola y las liquida on-chain. Si el pagador usa un Coinbase Smart Wallet aún sin desplegar, lo despliega primero, y **solo** llama a `createAccount` en las fábricas de Coinbase: cualquier otra llamada que venga en la firma se rechaza sin enviar nada |
-| **Watcher** | Sigue los eventos `IntentSettled` y confirma al API |
 | **Health** | Expone `/health` con el estado de cada subsistema |
+
+El nodo **no vigila eventos ni informa de qué se pagó**: eso lo lee la API
+directamente de la cadena, y no aceptaría la palabra de un nodo
+([ADR-007](https://github.com/lacasoft/coatipay-protocol/blob/master/audits/adr/007-liquidaciones-leidas-de-la-cadena.md)).
+Tu trabajo es liquidar; que el comercio se entere es cosa de la API.
 
 Varios nodeits pueden trabajar a la vez: la cola usa `FOR UPDATE SKIP LOCKED`,
 así que nunca dos toman la misma autorización.
