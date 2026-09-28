@@ -16,9 +16,7 @@ const ConfigSchema = z
     port: z.coerce.number().default(4000),
     /// Red en la que opera el nodo, declarada — no deducida del texto de la URL
     /// del RPC. Al arrancar se comprueba que cada RPC sirve esa red. CHAIN.
-    chain: z.enum(['base', 'base-sepolia'], {
-      required_error: 'declara la red: base-sepolia o base',
-    }),
+    chain: z.enum(['base', 'base-sepolia'], { error: 'declara la red: base-sepolia o base' }),
     /// NODE_ENV=production. En producción no hay «modo dev»: una dirección de
     /// contrato o una clave a cero es un error de configuración, no un permiso
     /// para arrancar sin liquidar.
@@ -31,15 +29,15 @@ const ConfigSchema = z
     /// dirección de esa firma, así que aquí es también la identidad del nodo.
     privateKey: z
       .custom<`0x${string}`>((v) => typeof v === 'string' && /^0x[a-fA-F0-9]{64}$/.test(v), {
-        message: 'NODE_OPERATOR_PRIVATE_KEY must be 0x + 64 hex chars',
+        error: 'NODE_OPERATOR_PRIVATE_KEY must be 0x + 64 hex chars',
       })
       .default('0x0000000000000000000000000000000000000000000000000000000000000000'),
     endpoint: z.string().default('http://localhost:4000'),
-    baseRpcUrl: z.string().url().default('https://sepolia.base.org'),
+    baseRpcUrl: z.url().default('https://sepolia.base.org'),
     /// Optional backup RPC endpoints for failover when the primary errors or
     /// hits its quota. The chain's public RPC is always appended as last resort.
     /// From BASE_RPC_FALLBACK_URLS (comma-separated).
-    baseRpcFallbackUrls: z.array(z.string().url()).default([]),
+    baseRpcFallbackUrls: z.array(z.url()).default([]),
     nodeRegistryAddress: z.string().default('0x0000000000000000000000000000000000000000'),
     /// SettlementHub address — daemon calls registerIntent (lazy, on first
     /// claim) and payIntentWithAuthorization in the settler service. Zero in dev.
@@ -50,7 +48,7 @@ const ConfigSchema = z
     /// Internal API base URL (where /v1/internal/* endpoints live). Read from
     /// API_INTERNAL_URL. Default `http://api:3000` matches the docker-compose
     /// service name; override to localhost for non-docker dev.
-    apiUrl: z.string().url().default('http://api:3000'),
+    apiUrl: z.url().default('http://api:3000'),
 
     // ── Settlement economics (never settle at a loss) ──────────────
     /// Minimum payment value (USDC base units) worth settling at the reference
@@ -75,7 +73,7 @@ const ConfigSchema = z
       for (const [campo, variable] of obligatorias) {
         if (c[campo].toLowerCase() === ZERO_ADDRESS) {
           ctx.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: 'custom',
             path: [campo],
             message: `${variable} está a cero. En producción el nodo no arranca sin liquidar: sin esta dirección no podría hacer su trabajo`,
           })
@@ -83,7 +81,7 @@ const ConfigSchema = z
       }
       if (c.privateKey === ZERO_KEY) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           path: ['privateKey'],
           message: 'NODE_OPERATOR_PRIVATE_KEY no está definida',
         })
@@ -93,7 +91,7 @@ const ConfigSchema = z
       const deLaClave = privateKeyToAccount(c.privateKey).address
       if (!isAddressEqual(c.operatorAddress as `0x${string}`, deLaClave)) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           path: ['operatorAddress'],
           message: `no es la dirección de NODE_OPERATOR_PRIVATE_KEY (${deLaClave}). La API te identifica por la clave; el gas se vigilaría en otra cuenta`,
         })
