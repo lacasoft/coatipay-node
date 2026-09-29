@@ -135,6 +135,13 @@ directamente de la cadena, y no aceptaría la palabra de un nodo
 ([ADR-007](https://github.com/lacasoft/coatipay-protocol/blob/master/audits/adr/007-liquidaciones-leidas-de-la-cadena.md)).
 Tu trabajo es liquidar; que el comercio se entere es cosa de la API.
 
+Lo único que el nodo sí le cuenta a la API, al enviar cada transacción de pago,
+es **su hash y qué autorizaciones paga** (`POST /v1/internal/authorizations/broadcast`).
+Sirve solo para medir cuánto tarda un pago (autorización → envío → final):
+la API anota su propia hora, no cambia el estado de nada, y solo acepta el aviso
+de quien reclamó esas autorizaciones. El nodo no lo espera ni lo reintenta: si
+se pierde, la liquidación sigue igual.
+
 Varios nodeits pueden trabajar a la vez: la cola usa `FOR UPDATE SKIP LOCKED`,
 así que nunca dos toman la misma autorización.
 
