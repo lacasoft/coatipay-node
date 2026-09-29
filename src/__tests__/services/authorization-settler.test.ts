@@ -208,9 +208,14 @@ describe('startAuthorizationSettler', () => {
     const payAuth = (writeCalls[1]![0] as { args: [{ signature: string }] }).args[0]
     expect(payAuth.signature).toBe(`0x${'ab'.repeat(65)}`)
 
-    // API calls: only the claim. The node reports neither the registration
-    // nor the settlement — the API reads both from the chain (F-5).
-    expect(postCalls.map((c) => c.path)).toEqual(['/v1/internal/authorizations/claim-batch'])
+    // API calls: the claim, and the broadcast notice (only for metrics, punto
+    // 6). The node reports neither the registration nor the settlement — the
+    // API reads both from the chain (F-5).
+    expect(postCalls.map((c) => c.path)).toEqual([
+      '/v1/internal/authorizations/claim-batch',
+      '/v1/internal/authorizations/broadcast',
+    ])
+    expect(postCalls[1]?.body).toEqual({ ids: ['pa_1'], tx_hash: '0xbbbb' })
   })
 
   it('skips registerIntent when intent already on-chain', async () => {
@@ -264,7 +269,10 @@ describe('startAuthorizationSettler', () => {
     ).toBe('payIntentWithAuthorization')
 
     // API path: only the claim. Nothing about the registration is reported.
-    expect(postCalls.map((c) => c.path)).toEqual(['/v1/internal/authorizations/claim-batch'])
+    expect(postCalls.map((c) => c.path)).toEqual([
+      '/v1/internal/authorizations/claim-batch',
+      '/v1/internal/authorizations/broadcast',
+    ])
   })
 
   it('ERC-6492: deploys the counterfactual wallet, then settles with the inner sig', async () => {
