@@ -53,15 +53,17 @@ import { intentIdToBytes32, SETTLEMENT_HUB_ABI, ZERO_ADDRESS } from '../lib/sett
 
 /// Base poll interval. Used while the queue has work — every cycle finds
 /// something to settle. When the queue goes empty, the next-tick delay
-/// backs off geometrically up to POLL_INTERVAL_MAX_MS so we stop
-/// hammering the API and RPC with no-op cycles.
+/// backs off up to POLL_INTERVAL_MAX_MS so we stop hammering the API and RPC
+/// with no-op cycles.
 const POLL_INTERVAL_MS = 5_000
-/// Cap on the backoff. 60s is the longest acceptable wait before we
-/// notice the queue has work again — a merchant who just submitted an
-/// authorization shouldn't wait more than this for first settlement attempt.
-const POLL_INTERVAL_MAX_MS = 60_000
-/// Multiplier per empty cycle. 5s → 10s → 20s → 40s → 60s (capped).
-/// 5 doublings to reach max.
+/// Cap on the backoff: the longest a payment can wait to be claimed after a
+/// quiet spell. It was 60 s, and with pilot-scale volume almost every payment
+/// arrives after a quiet spell: authorization → claim measured p50 21 s and
+/// p95 47.5 s, against a pilot target of p95 ≤ 30 s up to the broadcast
+/// (punto 6). 10 s costs 6 idle cycles a minute (one claim call, one balance
+/// read), not 1.
+const POLL_INTERVAL_MAX_MS = 10_000
+/// Multiplier per empty cycle: 5 s → 10 s (capped).
 const BACKOFF_MULTIPLIER = 2
 
 // Below this ETH balance the settler logs a warning and skips its cycle

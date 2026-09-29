@@ -882,17 +882,17 @@ describe('startAuthorizationSettler', () => {
     expect(postCalls).toHaveLength(0)
   })
 
-  it('backs off polling cadence when the queue stays empty', async () => {
-    // With setInterval at 5s, an idle settler hammered the API and RPC
-    // 12 times per minute even when there was nothing to settle. The
-    // backoff (5 → 10 → 20 → 40 → 60s cap) cuts that to ~4 ticks per
-    // 75 seconds. We assert the upper bound here — under setInterval
-    // the same window would have produced ~15 ticks.
+  it('backs off when the queue stays empty, but never waits more than 10 s', async () => {
+    // Idle, it backs off 5 s → 10 s so it does not hammer the API and RPC every
+    // 5 s. The cap is the latency guarantee (punto 6, #38): with a 60 s cap, a
+    // payment after a quiet spell waited up to a minute to be claimed.
     const hubClients = buildHubClients()
     const { api, postCalls } = buildApiMock()
+    const instantes: number[] = []
     ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
       async (path: string, body: unknown) => {
         postCalls.push({ path, body })
+        instantes.push(Date.now())
         return batchOf() // always empty — drives the backoff
       },
     )
@@ -904,20 +904,21 @@ describe('startAuthorizationSettler', () => {
       logger: mockLogger as never,
     })
 
-    // 75 seconds: schedule should produce ticks at +5s, +15s, +35s, +75s.
-    await vi.advanceTimersByTimeAsync(75_001)
+    // Five idle minutes: ticks at +5 s, +15 s, +25 s… every 10 s.
+    await vi.advanceTimersByTimeAsync(300_001)
     await Promise.resolve()
     stop()
 
-    // Under setInterval(5s) this would be 15. Backed-off settler: at most 5.
-    expect(postCalls.length).toBeGreaterThanOrEqual(3)
-    expect(postCalls.length).toBeLessThanOrEqual(5)
+    const huecos = instantes.slice(1).map((t, i) => t - (instantes[i] as number))
+    expect(Math.max(...huecos)).toBeLessThanOrEqual(10_000)
+    // Fewer calls than a fixed 5 s cadence (60 in five minutes).
+    expect(postCalls.length).toBeLessThanOrEqual(31)
   })
 
   it('resets to base interval when a cycle finds work after a backoff', async () => {
-    // First two ticks: empty → backoff to 10s and 20s.
-    // Third tick (at +35s): returns 1 claim → backoff must reset.
-    // Fourth tick should fire at +35s + 5s = +40s, not +35s + 40s = +75s.
+    // First two ticks: empty → backoff to 10 s (the cap).
+    // Third tick (at +25 s): returns 1 claim → backoff must reset.
+    // Fourth tick should fire at +25 s + 5 s = +30 s, not +25 s + 10 s = +35 s.
     const hubClients = buildHubClients()
     const { api, postCalls } = buildApiMock()
     let callCount = 0
@@ -961,16 +962,16 @@ describe('startAuthorizationSettler', () => {
       logger: mockLogger as never,
     })
 
-    // Advance to +45s: at +5s empty, +15s empty, +35s WORK → reset to base,
-    // next tick at +40s should fire — bringing claim-batch posts to 4.
-    await vi.advanceTimersByTimeAsync(45_001)
+    // Advance to +31 s: at +5 s empty, +15 s empty, +25 s WORK → reset to
+    // base, next tick at +30 s should fire — bringing claim-batch posts to 4.
+    await vi.advanceTimersByTimeAsync(31_001)
     await Promise.resolve()
     await Promise.resolve()
     stop()
 
     const claimPosts = postCalls.filter((c) => c.path === '/v1/internal/authorizations/claim-batch')
-    // Without the reset: +5s, +15s, +35s, +75s → only 3 within 45s.
-    // With reset on cycle 3 (work found): +5s, +15s, +35s, +40s → 4 within 45s.
+    // Without the reset: +5 s, +15 s, +25 s, +35 s → only 3 within 31 s.
+    // With reset on cycle 3 (work found): +5 s, +15 s, +25 s, +30 s → 4.
     expect(claimPosts.length).toBeGreaterThanOrEqual(4)
   })
 })
