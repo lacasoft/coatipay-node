@@ -557,6 +557,12 @@ async function settleBatch(ctx: SettlerContext, claimed: ClaimResponse[]): Promi
       chain: null,
     })
 
+    avisarEnvio(
+      ctx,
+      claimedList.map((c) => c.authorization.id),
+      payTxHash,
+    )
+
     const payReceipt = await ctx.hubClients.publicClient.waitForTransactionReceipt({
       hash: payTxHash,
     })
@@ -960,8 +966,23 @@ async function submitPayment(
     chain: null,
   })
 
+  avisarEnvio(ctx, [auth.id], txHash)
+
   const receipt = await ctx.hubClients.publicClient.waitForTransactionReceipt({ hash: txHash })
   if (receipt.status !== 'success') {
     throw new Error(`payIntentWithAuthorization_reverted: ${txHash}`)
   }
+}
+
+/// Avisa a la API de que salió la transacción que paga estas autorizaciones,
+/// para medir autorización → broadcast → finality (punto 6). No se espera ni
+/// se reintenta: un aviso perdido solo deja un hueco en las métricas, y la
+/// liquidación no puede quedarse esperando a la API.
+export function avisarEnvio(ctx: SettlerContext, ids: string[], txHash: Hex): void {
+  ctx.api.post('/v1/internal/authorizations/broadcast', { ids, tx_hash: txHash }).catch((err) => {
+    ctx.logger.warn(
+      { count: ids.length, tx_hash: txHash, err: err instanceof Error ? err.message : String(err) },
+      '[settler] No se pudo avisar del envío a la API (solo afecta a las métricas)',
+    )
+  })
 }
