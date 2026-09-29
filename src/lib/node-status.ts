@@ -20,9 +20,10 @@ export const GAS_CRITICAL_WEI = 1_000_000_000_000_000n // 0.001 ETH
 /// (still settling, but the operator should top up soon). 5× the floor.
 export const GAS_WARNING_WEI = 5n * GAS_CRITICAL_WEI // 0.005 ETH
 
-/// No settler tick in this long ⇒ the loop is hung/dead. The settler backs
-/// off to at most 60s when idle, so 150s (2.5×) can't false-positive on a
-/// healthy idle node.
+/// No settler tick in this long ⇒ the loop is hung/dead. Idle, the settler
+/// ticks at least every 10 s; a tick with work (register, pay, wait for the
+/// receipt) can take 30-60 s on a slow chain. 150 s can't false-positive on
+/// either.
 const SETTLER_STALE_MS = 150_000
 
 export type GasStatus = 'healthy' | 'warning' | 'critical' | 'offline'
