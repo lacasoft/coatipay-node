@@ -5,6 +5,7 @@ import {
   GAS_WARNING_WEI,
   type NodeStatusState,
 } from '../../lib/node-status.js'
+import { VERSION } from '../../lib/version'
 
 const NOW = 1_700_000_000_000
 
@@ -33,7 +34,7 @@ describe('deriveHealth', () => {
       gas: 'healthy',
       rpc: 'ok',
       settler: 'running',
-      version: '0.1.0',
+      version: VERSION,
     })
     expect(h.uptime_seconds).toBe(60)
   })
@@ -105,6 +106,12 @@ describe('deriveHealth', () => {
   it('api → rejected (403) pone el nodo en down: no puede trabajar', () => {
     const h = deriveHealth(healthyState({ api: 'rejected' }), NOW)
     expect(h.api).toBe('rejected')
+    expect(h.status).toBe('down')
+  })
+
+  it('api → incompatible (la API habla otro canal) pone el nodo en down: hay que actualizarlo', () => {
+    const h = deriveHealth(healthyState({ api: 'incompatible' }), NOW)
+    expect(h.api).toBe('incompatible')
     expect(h.status).toBe('down')
   })
 

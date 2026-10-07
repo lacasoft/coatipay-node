@@ -147,3 +147,44 @@ describe('loadConfig — los errores nombran la variable de entorno', () => {
     expect(mensaje).toContain('MIN_PAYMENT_AMOUNT:')
   })
 })
+
+describe('loadConfig — la firma del operador no viaja en claro', () => {
+  it.each([
+    'https://api.coatipay.com',
+    'https://api.example.com:8443',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://[::1]:3000',
+    'http://api:3000', // el servicio de docker compose
+    'http://10.0.0.5:3000',
+    'http://172.16.3.4:3000',
+    'http://192.168.1.20:3000',
+    'http://api.internal:3000',
+    'http://[fd00::1]:3000',
+  ])('%s vale', (url) => {
+    expect(loadConfig(produccion({ API_INTERNAL_URL: url })).apiUrl).toBe(url)
+  })
+
+  it.each([
+    'http://api.coatipay.com',
+    'http://api.example.com:3000',
+    'http://203.0.113.7:3000',
+    'http://172.32.0.1:3000', // fuera del rango privado 172.16/12
+    'http://[2001:db8::1]:3000',
+    'ftp://localhost',
+  ])('%s no: el nodo no arranca, y dice qué hace falta', (url) => {
+    expect(() => loadConfig(produccion({ API_INTERNAL_URL: url }))).toThrow(
+      /API_INTERNAL_URL debe ser https/,
+    )
+  })
+
+  it('por defecto, el servicio de docker compose', () => {
+    expect(loadConfig(produccion()).apiUrl).toBe('http://api:3000')
+  })
+
+  it('tampoco fuera de producción: en desarrollo la API es local', () => {
+    expect(() => loadConfig({ API_INTERNAL_URL: 'http://api.example.com' })).toThrow(
+      /API_INTERNAL_URL debe ser https/,
+    )
+  })
+})

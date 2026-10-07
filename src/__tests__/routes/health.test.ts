@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { VERSION } from '../../lib/version'
 import { healthRoute, infoRoute } from '../../routes/health.js'
 
 let app: FastifyInstance
@@ -43,7 +44,7 @@ describe('GET /health (public — coarse node health buckets)', () => {
   it('should return version', async () => {
     const response = await app.inject({ method: 'GET', url: '/health' })
     const body = response.json()
-    expect(body.version).toBe('0.1.0')
+    expect(body.version).toBe(VERSION)
   })
 
   it('should NOT expose operator address (public endpoint)', async () => {
@@ -74,7 +75,7 @@ describe('GET /info (respuesta pública)', () => {
   it('devuelve solo status y version', async () => {
     const res = await app.inject({ method: 'GET', url: '/info' })
     expect(res.statusCode).toBe(200)
-    expect(JSON.parse(res.body)).toEqual({ status: 'ok', version: '0.1.0' })
+    expect(JSON.parse(res.body)).toEqual({ status: 'ok', version: VERSION })
   })
 
   it('NO expone la dirección del operador', async () => {

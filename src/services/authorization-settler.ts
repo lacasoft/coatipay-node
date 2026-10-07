@@ -249,7 +249,7 @@ async function runOnce(ctx: SettlerContext): Promise<boolean> {
   } catch (err) {
     // /health tiene que saberlo: la vuelta del settler sigue, pero sin la API
     // el nodo no trabaja.
-    recordApiResult(err instanceof InternalApiError && err.status === 403 ? 'rejected' : 'down')
+    recordApiResult(resultadoDeLaApi(err))
     throw err
   }
   const claimedList = result?.authorizations ?? []
@@ -433,6 +433,15 @@ async function settleSingle(ctx: SettlerContext, claimed: ClaimResponse): Promis
       '[settler] Submission failed (permanent) → marked rejected',
     )
   }
+}
+
+/// Lo que dice /health de la última llamada a la API. `incompatible`: la API
+/// habla otra versión del canal, y reintentar no lo arregla — hay que
+/// actualizar el nodo.
+function resultadoDeLaApi(err: unknown): 'rejected' | 'incompatible' | 'down' {
+  if (!(err instanceof InternalApiError)) return 'down'
+  if (err.canalDeLaApi !== null) return 'incompatible'
+  return err.status === 403 ? 'rejected' : 'down'
 }
 
 /// Batch-settle path — registers any not-yet-on-chain intents in one
