@@ -10,7 +10,7 @@
 // without a running daemon. Nothing here exposes exact balances, block
 // numbers, or addresses — only health buckets safe for a public endpoint.
 
-const VERSION = '0.1.0'
+import { VERSION } from './version'
 
 /// ETH balance at/below which the settler pauses settling → gas `critical`.
 /// SSOT: the AuthorizationSettler imports this as its skip threshold, so the
@@ -30,9 +30,10 @@ export type GasStatus = 'healthy' | 'warning' | 'critical' | 'offline'
 export type RpcStatus = 'ok' | 'down'
 export type SettlerStatus = 'running' | 'stalled' | 'disabled'
 /// Si la API acepta al nodo. `rejected` = 403 (no autorizado: stake por debajo
-/// del mínimo, dado de baja…); `down` = no responde; `unknown` = aún no se ha
-/// llamado.
-export type ApiStatus = 'ok' | 'rejected' | 'down' | 'unknown' | 'disabled'
+/// del mínimo, dado de baja…); `incompatible` = la API habla otra versión del
+/// canal y hay que actualizar el nodo; `down` = no responde; `unknown` = aún no
+/// se ha llamado.
+export type ApiStatus = 'ok' | 'rejected' | 'incompatible' | 'down' | 'unknown' | 'disabled'
 export type OverallStatus = 'ok' | 'degraded' | 'down'
 
 export interface HealthReport {
@@ -94,7 +95,7 @@ export function recordRpcError(): void {
 /// Resultado de la última llamada a la API. Antes el settler marcaba su vuelta
 /// aunque la API lo rechazara, y /health decía `ok` con el nodo sin poder
 /// trabajar.
-export function recordApiResult(resultado: 'ok' | 'rejected' | 'down'): void {
+export function recordApiResult(resultado: 'ok' | 'rejected' | 'incompatible' | 'down'): void {
   state.api = resultado
 }
 
@@ -129,7 +130,14 @@ function rollup(
   const gasNeverRead = s.balanceAt === null
   const gasDown = gas === 'critical' || (gas === 'offline' && !gasNeverRead)
   // Un nodo que no puede hablar con la API no puede trabajar.
-  if (gasDown || rpc === 'down' || settler === 'stalled' || api === 'down' || api === 'rejected') {
+  if (
+    gasDown ||
+    rpc === 'down' ||
+    settler === 'stalled' ||
+    api === 'down' ||
+    api === 'rejected' ||
+    api === 'incompatible'
+  ) {
     return 'down'
   }
   if (gas === 'warning' || (gas === 'offline' && gasNeverRead)) {

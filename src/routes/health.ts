@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { computeHealth } from '../lib/node-status'
+import { VERSION } from '../lib/version'
 
 export async function healthRoute(app: FastifyInstance) {
   // Public, coarse, non-sensitive node health. Beyond a liveness ping it
@@ -14,5 +15,5 @@ export async function infoRoute(app: FastifyInstance) {
   // con el secreto HMAC compartido: nadie la consumía (el API mide liveness
   // contra /health) y devolvía un stake hardcodeado. El stake real es
   // verificable on-chain en StakeManager, que es donde debe leerse.
-  app.get('/info', async () => ({ status: 'ok', version: '0.1.0' }))
+  app.get('/info', async () => ({ status: 'ok', version: VERSION }))
 }

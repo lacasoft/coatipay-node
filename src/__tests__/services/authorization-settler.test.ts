@@ -1312,6 +1312,14 @@ describe('/health sabe si la API deja trabajar al nodo', () => {
     expect(h.status).toBe('down')
   })
 
+  it('la API habla otra versión del canal: «incompatible», no un rechazo cualquiera', async () => {
+    const h = await vueltaCon(async () => {
+      throw new InternalApiError(403, '/v1/internal/authorizations/claim-batch', 'forbidden', '3')
+    })
+    expect(h.api).toBe('incompatible')
+    expect(h.status).toBe('down')
+  })
+
   it('cualquier otro fallo es «caída»', async () => {
     const h = await vueltaCon(async () => {
       throw new Error('fetch failed')

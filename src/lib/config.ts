@@ -1,3 +1,4 @@
+import { BlockList, isIP } from 'node:net'
 import {
   DEFAULT_GAS_PRICE_REF_GWEI,
   DEFAULT_MIN_PAYMENT_AMOUNT,
@@ -87,6 +88,16 @@ const ConfigSchema = z
         })
       }
     }
+    // Cada petición a la API lleva la firma del operador. Por http viajaría
+    // en claro; solo se admite dentro de la propia máquina o de una red privada.
+    if (!esHttpsOLocal(c.apiUrl)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['apiUrl'],
+        message:
+          'API_INTERNAL_URL debe ser https. Por http solo se admite localhost, una dirección privada o un nombre interno (sin puntos, `.internal`, `.local`)',
+      })
+    }
     if (c.operatorAddress && c.privateKey !== ZERO_KEY) {
       const deLaClave = privateKeyToAccount(c.privateKey).address
       if (!isAddressEqual(c.operatorAddress as `0x${string}`, deLaClave)) {
@@ -109,6 +120,38 @@ const ConfigSchema = z
   }))
 
 export type Config = z.infer<typeof ConfigSchema>
+
+const REDES_PRIVADAS = new BlockList()
+REDES_PRIVADAS.addSubnet('127.0.0.0', 8)
+REDES_PRIVADAS.addSubnet('10.0.0.0', 8)
+REDES_PRIVADAS.addSubnet('172.16.0.0', 12)
+REDES_PRIVADAS.addSubnet('192.168.0.0', 16)
+REDES_PRIVADAS.addAddress('::1', 'ipv6')
+REDES_PRIVADAS.addSubnet('fc00::', 7, 'ipv6')
+REDES_PRIVADAS.addSubnet('fe80::', 10, 'ipv6')
+
+/// ¿La URL de la API va por https, o no sale de la máquina o de una red
+/// privada? Un nombre sin puntos (`api`, el de docker compose) o acabado en
+/// `.internal` o `.local` no existe en internet.
+export function esHttpsOLocal(url: string): boolean {
+  let destino: URL
+  try {
+    destino = new URL(url)
+  } catch {
+    return false
+  }
+  if (destino.protocol === 'https:') return true
+  if (destino.protocol !== 'http:') return false
+  const host = destino.hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  const tipo = isIP(host)
+  if (tipo !== 0) return REDES_PRIVADAS.check(host, tipo === 6 ? 'ipv6' : 'ipv4')
+  return (
+    host === 'localhost' ||
+    !host.includes('.') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.local')
+  )
+}
 
 /// La variable de entorno de cada campo, para los mensajes de error. El tipo
 /// obliga a que estén todos: un campo nuevo sin su variable no compila.
