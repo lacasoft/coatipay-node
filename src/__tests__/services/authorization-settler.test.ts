@@ -63,6 +63,8 @@ function buildHubClients(overrides: Partial<DaemonChainClients> = {}): DaemonCha
         status: 0,
       }),
       waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: 'success' }),
+      // El lote de pagos se simula antes de enviarlo (OCT-04): por defecto, liquida.
+      simulateContract: vi.fn().mockResolvedValue({ result: 1n }),
     } as never,
     walletClient: {
       writeContract: vi.fn(),
@@ -1155,20 +1157,23 @@ describe('regresión · el settler solo despliega con la fábrica permitida', ()
         // Por función: `authorizationState` (nonce de USDC) es un booleano. Un
         // objeto aquí se leería como «nonce ya usado» y rechazaría la buena.
         readContract: vi.fn(async ({ functionName }: { functionName: string }) =>
-          functionName === 'authorizationState'
+          functionName === 'authorizationState' || functionName === 'isBlacklisted'
             ? false
-            : {
-                merchant: MERCHANT,
-                amount: 5_000_000n,
-                operator: OPERATOR,
-                expiresAt: 9999999999n,
-                status: 0,
-              },
+            : functionName === 'balanceOf'
+              ? 10n ** 12n
+              : {
+                  merchant: MERCHANT,
+                  amount: 5_000_000n,
+                  operator: OPERATOR,
+                  expiresAt: 9999999999n,
+                  status: 0,
+                },
         ),
         // Sin código: si la política dejara pasar algo, el settler intentaría
         // «desplegar» y esa sendTransaction sería la llamada del atacante.
         getCode: vi.fn().mockResolvedValue('0x'),
         waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: 'success', logs: [] }),
+        simulateContract: vi.fn().mockResolvedValue({ result: 1n }),
         getContractEvents: vi.fn().mockResolvedValue([]),
       } as never,
       walletClient: {
@@ -1479,6 +1484,151 @@ describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
 
     expect(rechazos).toEqual([])
     expect(lotesDePago).toEqual([])
+  })
+})
+
+describe('un lote que no liquida nada no se envía, y lo saltado se clasifica (OCT-04)', () => {
+  const PAGADOR_POBRE = '0x5555555555555555555555555555555555555555'
+
+  /// Una cadena que contesta como la real a lo que el settler pregunta para
+  /// clasificar: el nonce de USDC, el saldo, la lista negra y el intent.
+  function cadena(o: {
+    liquidaria: bigint
+    saldos?: Record<string, bigint>
+    bloqueadas?: string[]
+    lecturaFalla?: boolean
+    logs?: unknown[]
+  }) {
+    const hubClients = buildHubClients({
+      publicClient: {
+        getBalance: vi.fn().mockResolvedValue(10n ** 18n),
+        readContract: vi.fn(
+          async ({ functionName, args }: { functionName: string; args?: string[] }) => {
+            if (o.lecturaFalla && functionName !== 'getIntent') throw new Error('rpc caído')
+            const a = String(args?.[0] ?? '').toLowerCase()
+            if (functionName === 'authorizationState') return false
+            if (functionName === 'balanceOf') return o.saldos?.[a] ?? 10n ** 12n
+            if (functionName === 'isBlacklisted') return (o.bloqueadas ?? []).includes(a)
+            // getIntent: registrado, con su comercio y su operador.
+            return {
+              merchant: MERCHANT,
+              amount: 5_000_000n,
+              operator: OPERATOR,
+              expiresAt: 9999999999n,
+              status: 0,
+            }
+          },
+        ),
+        waitForTransactionReceipt: vi
+          .fn()
+          .mockResolvedValue({ status: 'success', logs: o.logs ?? [] }),
+        simulateContract: vi.fn().mockResolvedValue({ result: o.liquidaria }),
+      } as never,
+      walletClient: { writeContract: vi.fn().mockResolvedValue('0xpay' as Hex) } as never,
+    })
+    return hubClients
+  }
+
+  async function vuelta(
+    hubClients: DaemonChainClients,
+    ...claims: ReturnType<typeof makeClaimResponse>[]
+  ) {
+    const { api, postCalls } = buildApiMock()
+    let primera = true
+    ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
+      async (path: string, body: unknown) => {
+        postCalls.push({ path, body })
+        if (primera && path.endsWith('/claim-batch')) {
+          primera = false
+          return batchOf(...claims)
+        }
+        return path.endsWith('/claim-batch') ? { authorizations: [] } : null
+      },
+    )
+    const stop = startAuthorizationSettler({
+      config: baseConfig,
+      hubClients,
+      api,
+      logger: mockLogger as never,
+    })
+    await vi.advanceTimersByTimeAsync(5_001)
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0)
+    stop()
+    const pagos = (
+      hubClients.walletClient.writeContract as ReturnType<typeof vi.fn>
+    ).mock.calls.filter(
+      (c) => (c[0] as { functionName: string }).functionName === 'payIntentBatchWithAuthorization',
+    )
+    return { rechazos: postCalls.filter((c) => c.path.endsWith('/rejected')), pagos }
+  }
+
+  const claim = (n: string, payer = PAYER) => {
+    const c = makeClaimResponse({ id: `pa_${n}`, intentId: `pi_${n}` })
+    c.authorization.payer_address = payer
+    return c
+  }
+
+  it('si el contrato no liquidaría ninguno, no se envía: no se paga gas por nada', async () => {
+    const r = await vuelta(cadena({ liquidaria: 0n }), claim('1'), claim('2'))
+    expect(r.pagos).toHaveLength(0)
+    // Nada propio de ninguno (p. ej., la tesorería bloqueada): no se rechaza a nadie.
+    expect(r.rechazos).toEqual([])
+  })
+
+  it('sin saldo: se rechaza con un motivo que el checkout entiende (que cargue USDC)', async () => {
+    const r = await vuelta(
+      cadena({ liquidaria: 0n, saldos: { [PAGADOR_POBRE.toLowerCase()]: 1_000_000n } }),
+      claim('pobre', PAGADOR_POBRE),
+      claim('1'),
+    )
+    expect(r.rechazos).toHaveLength(1)
+    const [rechazo] = r.rechazos
+    expect(rechazo?.path).toBe('/v1/internal/authorizations/pa_pobre/rejected')
+    expect((rechazo?.body as { reason: string } | undefined)?.reason).toMatch(
+      /^insufficient balance/,
+    )
+  })
+
+  it('el comercio en la lista negra de USDC: se rechaza', async () => {
+    // Dos: con uno solo, el nodeit va por el camino individual, no por el lote.
+    const r = await vuelta(
+      cadena({ liquidaria: 0n, bloqueadas: [MERCHANT.toLowerCase()] }),
+      claim('1'),
+      claim('2'),
+    )
+    expect(r.rechazos.map((c) => (c.body as { reason: string }).reason)).toEqual([
+      'usdc_blacklisted: merchant',
+      'usdc_blacklisted: merchant',
+    ])
+  })
+
+  it('el operador del registro en la lista negra: se rechaza, porque el registro no se puede cambiar', async () => {
+    const r = await vuelta(
+      cadena({ liquidaria: 0n, bloqueadas: [OPERATOR.toLowerCase()] }),
+      claim('1'),
+      claim('2'),
+    )
+    expect(r.rechazos.map((c) => (c.body as { reason: string }).reason)).toEqual([
+      'usdc_blacklisted: operator',
+      'usdc_blacklisted: operator',
+    ])
+  })
+
+  it('si una lectura falla, no se rechaza: ante la duda, se reintenta', async () => {
+    const r = await vuelta(cadena({ liquidaria: 0n, lecturaFalla: true }), claim('1'), claim('2'))
+    expect(r.rechazos).toEqual([])
+  })
+
+  it('un lote que sí se envía clasifica igual lo que saltó', async () => {
+    const r = await vuelta(
+      cadena({ liquidaria: 1n, saldos: { [PAGADOR_POBRE.toLowerCase()]: 0n } }),
+      claim('pobre', PAGADOR_POBRE),
+      claim('1'),
+    )
+    expect(r.pagos).toHaveLength(1)
+    // El recibo no trae eventos: ninguno consta como liquidado. El pobre se
+    // rechaza; el otro queda para otra vuelta.
+    expect(r.rechazos.map((c) => c.path)).toEqual(['/v1/internal/authorizations/pa_pobre/rejected'])
   })
 })
 
