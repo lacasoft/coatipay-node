@@ -1,9 +1,17 @@
-import { encodeAbiParameters, encodeFunctionData, erc20Abi, type Hex } from 'viem'
+import {
+  ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
+  encodeAbiParameters,
+  encodeErrorResult,
+  encodeFunctionData,
+  erc20Abi,
+  type Hex,
+} from 'viem'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DaemonChainClients } from '../../lib/chain-client'
 import { InternalApiClient, InternalApiError } from '../../lib/internal-api-client'
 import { computeHealth, initNodeStatus } from '../../lib/node-status'
-import { intentIdToBytes32 } from '../../lib/settlement-hub-abi.js'
+import { intentIdToBytes32, SETTLEMENT_HUB_ABI } from '../../lib/settlement-hub-abi.js'
 import { startAuthorizationSettler } from '../../services/authorization-settler'
 
 const HUB = '0x1111111111111111111111111111111111111111' as `0x${string}`
@@ -1283,6 +1291,249 @@ describe('regresión · el settler solo despliega con la fábrica permitida', ()
     const pago = r.escrituras.find((e) => e.functionName === 'payIntentBatchWithAuthorization')
     expect(pago).toBeDefined()
     expect(pago?.args[0]).toHaveLength(1)
+  })
+})
+
+describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
+  type NombreDeError =
+    | 'InvalidExpiry'
+    | 'ZeroAddress'
+    | 'EnforcedPause'
+    | 'InvalidIntentSignature'
+    | 'AmountTooLarge'
+
+  /// La reversión tal como la entrega viem cuando el contrato revierte con un
+  /// error de su ABI.
+  const revertDelHub = (
+    errorName: NombreDeError,
+    functionName: 'registerIntent' | 'registerIntentBatch',
+  ) =>
+    new ContractFunctionExecutionError(
+      new ContractFunctionRevertedError({
+        abi: SETTLEMENT_HUB_ABI,
+        data: encodeErrorResult({ abi: SETTLEMENT_HUB_ABI, errorName }),
+        functionName,
+      }),
+      { abi: SETTLEMENT_HUB_ABI, functionName, args: [], contractAddress: HUB },
+    )
+
+  const noRegistrado = {
+    merchant: '0x0000000000000000000000000000000000000000',
+    amount: 0n,
+    operator: '0x0000000000000000000000000000000000000000',
+    expiresAt: 0n,
+    status: 0,
+  }
+
+  /// Un hub de mentira que se comporta como el de verdad en lo que importa
+  /// aquí: `registerIntentBatch` revierte ENTERO si un solo registro no pasa, y
+  /// `registerIntent` se puede simular uno a uno.
+  function hubQueRechaza(
+    malos: Record<string, NombreDeError | 'rpc'>,
+    yaRegistrados: string[] = [],
+  ) {
+    const registrados = new Set<string>(yaRegistrados.map((id) => intentIdToBytes32(id)))
+    const malosPorId = new Map<string, NombreDeError | 'rpc'>(
+      Object.entries(malos).map(([id, e]) => [intentIdToBytes32(id), e]),
+    )
+    const lotesDeRegistro: string[][] = []
+    const lotesDePago: string[][] = []
+    const hubClients = buildHubClients({
+      publicClient: {
+        getBalance: vi.fn().mockResolvedValue(10n ** 18n),
+        readContract: vi.fn(async ({ args }: { args: [string] }) =>
+          registrados.has(args[0])
+            ? { ...noRegistrado, merchant: MERCHANT, operator: OPERATOR }
+            : noRegistrado,
+        ),
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: 'success' }),
+        simulateContract: vi.fn(async ({ args }: { args: [{ intentId: string }] }) => {
+          const malo = malosPorId.get(args[0].intentId)
+          if (malo === 'rpc') throw new Error('fetch failed')
+          if (malo) throw revertDelHub(malo, 'registerIntent')
+          return { result: undefined }
+        }),
+      } as never,
+      walletClient: {
+        writeContract: vi.fn(
+          async ({ functionName, args }: { functionName: string; args: [unknown[]] }) => {
+            if (functionName === 'registerIntentBatch') {
+              const ids = (args[0] as { intentId: string }[]).map((r) => r.intentId)
+              lotesDeRegistro.push(ids)
+              const primero = ids.map((id) => malosPorId.get(id)).find((e) => e !== undefined)
+              if (primero === 'rpc') throw new Error('fetch failed')
+              if (primero) throw revertDelHub(primero, 'registerIntentBatch')
+              for (const id of ids) registrados.add(id)
+              return '0xreg' as Hex
+            }
+            lotesDePago.push((args[0] as { intentId: string }[]).map((a) => a.intentId))
+            return '0xpay' as Hex
+          },
+        ),
+      } as never,
+    })
+    return { hubClients, lotesDeRegistro, lotesDePago }
+  }
+
+  async function unaVuelta(
+    hubClients: DaemonChainClients,
+    ...claims: ReturnType<typeof makeClaimResponse>[]
+  ) {
+    const { api, postCalls } = buildApiMock()
+    let primera = true
+    ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
+      async (path: string, body: unknown) => {
+        postCalls.push({ path, body })
+        if (primera && path.endsWith('/claim-batch')) {
+          primera = false
+          return batchOf(...claims)
+        }
+        return path.endsWith('/claim-batch') ? { authorizations: [] } : null
+      },
+    )
+    const stop = startAuthorizationSettler({
+      config: baseConfig,
+      hubClients,
+      api,
+      logger: mockLogger as never,
+    })
+    await vi.advanceTimersByTimeAsync(5_001)
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0)
+    stop()
+    return postCalls.filter((c) => c.path.endsWith('/rejected'))
+  }
+
+  const claim = (n: string) => makeClaimResponse({ id: `pa_${n}`, intentId: `pi_${n}` })
+
+  it('el registro que el contrato nunca aceptará se rechaza; los demás se registran y se cobran', async () => {
+    const { hubClients, lotesDeRegistro, lotesDePago } = hubQueRechaza({ pi_malo: 'InvalidExpiry' })
+
+    const rechazos = await unaVuelta(hubClients, claim('1'), claim('malo'), claim('2'))
+
+    expect(rechazos).toEqual([
+      {
+        path: '/v1/internal/authorizations/pa_malo/rejected',
+        body: { reason: 'registration_refused: InvalidExpiry' },
+      },
+    ])
+    // El primer lote revierte entero; el segundo, sin el malo, pasa.
+    expect(lotesDeRegistro).toHaveLength(2)
+    expect(lotesDeRegistro[1]).toEqual([intentIdToBytes32('pi_1'), intentIdToBytes32('pi_2')])
+    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_1'), intentIdToBytes32('pi_2')]])
+  })
+
+  it('las demás causas propias del registro también son rechazo: dirección cero, importe excesivo', async () => {
+    const { hubClients, lotesDePago } = hubQueRechaza({
+      pi_a: 'ZeroAddress',
+      pi_b: 'AmountTooLarge',
+    })
+
+    const rechazos = await unaVuelta(hubClients, claim('a'), claim('1'), claim('b'))
+
+    expect(rechazos.map((r) => r.path).sort()).toEqual([
+      '/v1/internal/authorizations/pa_a/rejected',
+      '/v1/internal/authorizations/pa_b/rejected',
+    ])
+    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_1')]])
+  })
+
+  it('una firma de registro que no cuadra no se rechaza: sale de esta vuelta y los demás se cobran', async () => {
+    const { hubClients, lotesDePago } = hubQueRechaza({ pi_malo: 'InvalidIntentSignature' })
+
+    const rechazos = await unaVuelta(hubClients, claim('1'), claim('malo'))
+
+    expect(rechazos).toEqual([])
+    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_1')]])
+  })
+
+  it('con el hub en pausa no se rechaza a nadie, y lo ya registrado se cobra igual', async () => {
+    const { hubClients, lotesDeRegistro, lotesDePago } = hubQueRechaza(
+      { pi_nuevo: 'EnforcedPause' },
+      ['pi_viejo'],
+    )
+
+    const rechazos = await unaVuelta(hubClients, claim('viejo'), claim('nuevo'))
+
+    expect(rechazos).toEqual([])
+    expect(lotesDeRegistro).toEqual([[intentIdToBytes32('pi_nuevo')]])
+    // La pausa bloquea registros, no pagos.
+    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_viejo')]])
+  })
+
+  it('si la simulación misma falla (RPC), tampoco se rechaza', async () => {
+    const { hubClients, lotesDePago } = hubQueRechaza({ pi_malo: 'rpc' })
+
+    const rechazos = await unaVuelta(hubClients, claim('1'), claim('malo'))
+
+    expect(rechazos).toEqual([])
+    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_1')]])
+  })
+
+  it('si cada registro pasaría solo y el lote falla igual, se reintenta entero y no se rechaza a nadie', async () => {
+    const { hubClients, lotesDePago } = hubQueRechaza({})
+    ;(hubClients.walletClient.writeContract as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('nonce too low'),
+    )
+
+    const rechazos = await unaVuelta(hubClients, claim('1'), claim('2'))
+
+    expect(rechazos).toEqual([])
+    expect(lotesDePago).toEqual([])
+  })
+})
+
+describe('un solo pago: una reversión de todos no se castiga a uno', () => {
+  async function pagoSolo(error: Error) {
+    const hubClients = buildHubClients()
+    ;(hubClients.walletClient.writeContract as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      error,
+    )
+    const { api, postCalls } = buildApiMock()
+    let primera = true
+    ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
+      async (path: string, body: unknown) => {
+        postCalls.push({ path, body })
+        if (primera) {
+          primera = false
+          return batchOf(makeClaimResponse())
+        }
+        return path.endsWith('/claim-batch') ? { authorizations: [] } : null
+      },
+    )
+    const stop = startAuthorizationSettler({
+      config: baseConfig,
+      hubClients,
+      api,
+      logger: mockLogger as never,
+    })
+    await vi.advanceTimersByTimeAsync(5_001)
+    for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(0)
+    stop()
+    return postCalls.filter((c) => c.path.endsWith('/rejected'))
+  }
+
+  const revert = (errorName: 'EnforcedPause' | 'InvalidIntentSignature' | 'InvalidExpiry') =>
+    new ContractFunctionExecutionError(
+      new ContractFunctionRevertedError({
+        abi: SETTLEMENT_HUB_ABI,
+        data: encodeErrorResult({ abi: SETTLEMENT_HUB_ABI, errorName }),
+        functionName: 'registerIntent',
+      }),
+      { abi: SETTLEMENT_HUB_ABI, functionName: 'registerIntent', args: [], contractAddress: HUB },
+    )
+
+  it('el hub en pausa: la autorización queda para otra vuelta, no se rechaza', async () => {
+    expect(await pagoSolo(revert('EnforcedPause'))).toEqual([])
+  })
+
+  it('la firma del registro no cuadra con el firmante: tampoco se rechaza', async () => {
+    expect(await pagoSolo(revert('InvalidIntentSignature'))).toEqual([])
+  })
+
+  it('un registro que no pasará nunca sí se rechaza, como antes', async () => {
+    const rechazos = await pagoSolo(revert('InvalidExpiry'))
+    expect(rechazos).toHaveLength(1)
+    expect(rechazos[0]?.path).toBe('/v1/internal/authorizations/pa_1/rejected')
   })
 })
 

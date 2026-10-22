@@ -8,6 +8,7 @@
 //   - IntentSettled event: AuthorizationSettler, to tell which items of a
 //     batch settled. The settlement state itself is the API's (it reads the
 //     event from the hub).
+//   - The registration errors, to name why a registration reverted.
 import { keccak256, toHex } from 'viem'
 
 export const SETTLEMENT_HUB_ABI = [
@@ -140,6 +141,17 @@ export const SETTLEMENT_HUB_ABI = [
     ],
     anonymous: false,
   },
+  // Los errores con que `registerIntent` / `registerIntentBatch` pueden
+  // revertir: con ellos en el ABI, viem da el nombre del motivo y el settler
+  // distingue un registro que nunca pasará de un fallo de todos (OCT-01).
+  { type: 'error', name: 'ZeroAddress', inputs: [] },
+  { type: 'error', name: 'ZeroAmount', inputs: [] },
+  { type: 'error', name: 'AmountTooLarge', inputs: [] },
+  { type: 'error', name: 'InvalidExpiry', inputs: [] },
+  { type: 'error', name: 'AlreadyRegistered', inputs: [] },
+  { type: 'error', name: 'InvalidIntentSignature', inputs: [] },
+  { type: 'error', name: 'BatchTooLarge', inputs: [] },
+  { type: 'error', name: 'EnforcedPause', inputs: [] },
 ] as const
 
 /// Convert an off-chain intent id (e.g. `pi_abc123`) into the bytes32
