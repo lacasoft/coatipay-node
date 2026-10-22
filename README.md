@@ -16,18 +16,24 @@ API recupera tu dirección de esa firma y la comprueba contra `NodeRegistry`.
 
 ```
 tu daemon                          el API
-    │  firma  ${timestamp}.${body}
-    │  con NODE_OPERATOR_PRIVATE_KEY
+    │  firma con NODE_OPERATOR_PRIVATE_KEY:
+    │  canal (v2), hora, nonce de un solo uso,
+    │  método, ruta y hash del cuerpo
     ├──────────────────────────────────▶
+    │                                  ¿habla su versión del canal?
     │                                  recupera la dirección de la firma
     │                                  ¿está en NodeRegistry?  ¿activa?
     │                                  ¿stake ≥ mínimo?
+    │                                  ¿fuera de la lista negra de USDC?
+    │                                  ¿el nonce no se había usado?
     │                                          │
     ◀──────────────────────────────────────────┘
 ```
 
 Tu identidad **se demuestra, no se declara**. No puedes actuar como otro
 operador porque no puedes firmar con su llave — y nadie puede actuar como tú.
+Una petición capturada tampoco sirve de nada: el nonce vale una sola vez y la
+firma cubre el método y la ruta.
 
 ---
 
@@ -93,10 +99,11 @@ El campo `api` dice si el API te deja trabajar:
 | `api` | Qué significa |
 |---|---|
 | `ok` | El API acepta tus llamadas |
-| `rejected` | Te responde 403: no estás registrado y activo, tu stake no alcanza el mínimo, o la hora de tu máquina va desfasada |
+| `rejected` | Te responde 403: no estás registrado y activo, tu stake no alcanza el mínimo, tu dirección está en la lista negra de USDC (ningún pago que registres se podría cobrar), o la hora de tu máquina va desfasada |
+| `incompatible` | El API habla otra versión del canal que tu daemon. El log dice cuál habla cada uno; lo habitual es actualizar la imagen |
 | `down` | No responde |
 
-Con `rejected` o `down`, `status` es `down` aunque el proceso siga vivo.
+Con `rejected`, `incompatible` o `down`, `status` es `down` aunque el proceso siga vivo.
 
 Antes de aceptar trabajo, el daemon comprueba contra la cadena que cada RPC
 sirve la red de `CHAIN`, que `SETTLEMENT_HUB_ADDRESS` es un SettlementHub de esa

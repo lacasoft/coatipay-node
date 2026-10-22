@@ -42,11 +42,15 @@ README, SECURITY, la licencia, `.env.example` y la configuración de CI.
 
 ## Dos cosas que conviene saber
 
-**El canal con el API va firmado.** Cada llamada lleva
-`X-Operator-Signature` sobre `${timestamp}.${body}`, firmada con la llave del
-operador. Si tocas `lib/internal-api-client.ts`, recuerda que el API **recupera
-la dirección de esa firma** para autenticarte: cambiar lo que se firma rompe la
-autenticación.
+**El canal con el API va firmado (versión 2).** Cada llamada lleva
+`X-Operator-Channel: 2`, `X-Operator-Timestamp`, `X-Operator-Nonce` y
+`X-Operator-Signature`, una firma con la llave del operador sobre el canal, la
+hora, el nonce, el método, la ruta y el SHA-256 del cuerpo, un campo por línea
+(`mensajeDelCanal` en `lib/internal-api-client.ts`). El API **recupera la
+dirección de esa firma** para autenticarte y no acepta dos veces el mismo nonce:
+cambiar lo que se firma, o cómo, rompe la autenticación. La versión del canal
+está en `lib/version.ts`; si cambia, el API y el daemon tienen que pasar a la
+vez.
 
 **Las cabeceras son neutrales a propósito.** `X-Operator-*`, no el nombre del
 producto: son contrato con operadores externos y no deben romperse si la marca
