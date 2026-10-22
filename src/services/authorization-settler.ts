@@ -559,6 +559,25 @@ async function settleBatch(ctx: SettlerContext, claimed: ClaimResponse[]): Promi
       })
     }
 
+    // Un lote que no liquidaría nada no se envía: el gas se pagaría por nada,
+    // y todo volvería a la cola para repetirse (OCT-04). La simulación dice
+    // cuántos liquidaría el contrato; sin tocar la cadena.
+    const { result: liquidaria } = await ctx.hubClients.publicClient.simulateContract({
+      address: ctx.hubClients.settlementHubAddress,
+      abi: SETTLEMENT_HUB_ABI,
+      functionName: 'payIntentBatchWithAuthorization',
+      args: [auths],
+      account: ctx.hubClients.account,
+    })
+    if (liquidaria === 0n) {
+      ctx.logger.warn(
+        { count: claimedList.length },
+        '[settler] The batch would settle nothing — not sent',
+      )
+      await clasificarSaltados(ctx, claimedList, new Set())
+      return
+    }
+
     const payTxHash = await ctx.hubClients.walletClient.writeContract({
       address: ctx.hubClients.settlementHubAddress,
       abi: SETTLEMENT_HUB_ABI,
@@ -587,10 +606,10 @@ async function settleBatch(ctx: SettlerContext, claimed: ClaimResponse[]): Promi
     )
 
     // Reconcile: the batch is skip-on-failure, so some auths may have been
-    // skipped on-chain. Reject the permanently-bad ones (expired / nonce
-    // already used) so they don't churn until expiry; leave transient ones
-    // claimed for the sweeper to re-drive. (Settled ones: the API's reconciler
-    // reads their IntentSettled event — we don't report them.)
+    // skipped on-chain. Reject the permanently-bad ones so they don't churn
+    // until expiry; leave transient ones claimed for the sweeper to re-drive.
+    // (Settled ones: the API's reconciler reads their IntentSettled event — we
+    // don't report them.)
     await reconcileBatchOutcome(ctx, claimedList, payReceipt)
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
@@ -721,9 +740,8 @@ async function motivoParaNoRegistrar(
   }
 }
 
-/// USDC EIP-3009 nonce-consumption check — used in batch reconciliation to tell
-/// "already settled elsewhere" apart from a transient skip.
-const USDC_AUTH_STATE_ABI = [
+/// Lo que se le pregunta a USDC para clasificar lo que un lote no liquidó.
+const USDC_LECTURAS_ABI = [
   {
     type: 'function',
     name: 'authorizationState',
@@ -734,15 +752,24 @@ const USDC_AUTH_STATE_ABI = [
     ],
     outputs: [{ name: '', type: 'bool' }],
   },
+  {
+    type: 'function',
+    name: 'balanceOf',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'isBlacklisted',
+    stateMutability: 'view',
+    inputs: [{ name: '_account', type: 'address' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
 ] as const
 
 /// After a (skip-on-failure) batch tx, figure out which authorizations were
-/// skipped on-chain and act on each — read-only classification, NO re-simulation
-/// (which could trigger a counterfactual-wallet deploy):
-///   - settled (IntentSettled emitted)  → nothing (the API's reconciler owns state)
-///   - expired                          → reject (permanent)
-///   - nonce already consumed on-chain  → reject (settled via another tx)
-///   - otherwise                        → leave claimed (transient → sweeper retries)
+/// skipped on-chain and act on each.
 async function reconcileBatchOutcome(
   ctx: SettlerContext,
   claimed: ClaimResponse[],
@@ -761,47 +788,100 @@ async function reconcileBatchOutcome(
     // Can't parse logs — the API's reconciler + the sweeper cover it.
     return
   }
+  await clasificarSaltados(ctx, claimed, settledIds)
+}
 
-  const now = Math.floor(Date.now() / 1000)
+/// Lo que un lote no liquidó, uno a uno: se rechaza lo que no pasará nunca y lo
+/// demás queda reclamado para que el sweeper lo vuelva a repartir. Solo lee la
+/// cadena; no simula nada (podría desplegar una cartera contrafactual).
+async function clasificarSaltados(
+  ctx: SettlerContext,
+  claimed: ClaimResponse[],
+  settledIds: Set<string>,
+): Promise<void> {
   for (const c of claimed) {
     const onChainId = intentIdToBytes32(c.intent.intent_id).toLowerCase()
     if (settledIds.has(onChainId)) continue // settled — the API's reconciler records it
 
-    // Skipped on-chain. Classify cheaply (reads only).
-    if (Number(c.authorization.valid_before) <= now) {
-      await rejectAuthorization(ctx, c.authorization.id, 'expired (skipped in batch)')
-      ctx.logger.warn(
-        { auth_id: c.authorization.id, intent_id: c.intent.intent_id },
-        '[settler] Batch-skipped authorization expired → rejected',
-      )
-      continue
-    }
-
-    let nonceUsed = false
-    try {
-      nonceUsed = (await ctx.hubClients.publicClient.readContract({
-        address: ctx.config.usdcAddress as Address,
-        abi: USDC_AUTH_STATE_ABI,
-        functionName: 'authorizationState',
-        args: [c.authorization.payer_address, c.authorization.nonce],
-      })) as boolean
-    } catch {
-      // Read failed — treat as transient (leave claimed for retry).
-    }
-
-    if (nonceUsed) {
-      await rejectAuthorization(ctx, c.authorization.id, 'nonce already used (settled elsewhere)')
-      ctx.logger.warn(
-        { auth_id: c.authorization.id, intent_id: c.intent.intent_id },
-        '[settler] Batch-skipped authorization nonce already used → rejected',
-      )
+    const datos = { auth_id: c.authorization.id, intent_id: c.intent.intent_id }
+    const motivo = await motivoParaNoReintentar(ctx, c)
+    if (motivo) {
+      await rejectAuthorization(ctx, c.authorization.id, motivo)
+      ctx.logger.warn({ ...datos, motivo }, '[settler] Batch-skipped authorization → rejected')
     } else {
       ctx.logger.warn(
-        { auth_id: c.authorization.id, intent_id: c.intent.intent_id },
+        datos,
         '[settler] Batch-skipped authorization — leaving claimed for sweeper re-drive',
       )
     }
   }
+}
+
+/// Por qué una autorización que el lote saltó no pasará nunca, o `null` si
+/// puede pasar más adelante. Antes solo se reconocía la caducidad y el nonce ya
+/// usado: lo demás volvía en cada lote hasta su `validBefore` (OCT-04).
+///
+///   - caducada, o su nonce ya se usó en otra transacción;
+///   - el pagador no tiene saldo para el importe —el motivo lo entiende el
+///     checkout: le dice que cargue USDC—;
+///   - USDC tiene en su lista negra al comercio o al operador del intent: el
+///     registro no se puede cambiar.
+///
+/// Lo que es de todos (USDC en pausa, el hub o la tesorería bloqueados) no se
+/// rechaza: cuando se arregle, la misma firma vale. Una lectura que falla
+/// tampoco: ante la duda, se reintenta.
+async function motivoParaNoReintentar(
+  ctx: SettlerContext,
+  c: ClaimResponse,
+): Promise<string | null> {
+  if (Number(c.authorization.valid_before) <= Math.floor(Date.now() / 1000)) {
+    return 'expired (skipped in batch)'
+  }
+  const usdc = ctx.config.usdcAddress as Address
+  const leer = ctx.hubClients.publicClient
+  try {
+    const nonceUsado = await leer.readContract({
+      address: usdc,
+      abi: USDC_LECTURAS_ABI,
+      functionName: 'authorizationState',
+      args: [c.authorization.payer_address as Address, c.authorization.nonce as Hex],
+    })
+    if (nonceUsado) return 'nonce already used (settled elsewhere)'
+
+    const saldo = await leer.readContract({
+      address: usdc,
+      abi: USDC_LECTURAS_ABI,
+      functionName: 'balanceOf',
+      args: [c.authorization.payer_address as Address],
+    })
+    const importe = BigInt(c.intent.amount)
+    if (saldo < importe) {
+      return `insufficient balance: the payer has ${saldo} and the payment needs ${importe}`
+    }
+
+    const intent = (await leer.readContract({
+      address: ctx.hubClients.settlementHubAddress,
+      abi: SETTLEMENT_HUB_ABI,
+      functionName: 'getIntent',
+      args: [intentIdToBytes32(c.intent.intent_id)],
+    })) as { merchant: Address; operator: Address }
+    for (const [parte, direccion] of [
+      ['merchant', intent.merchant],
+      ['operator', intent.operator],
+    ] as const) {
+      if (direccion === ZERO_ADDRESS) continue
+      const bloqueada = await leer.readContract({
+        address: usdc,
+        abi: USDC_LECTURAS_ABI,
+        functionName: 'isBlacklisted',
+        args: [direccion],
+      })
+      if (bloqueada) return `usdc_blacklisted: ${parte}`
+    }
+  } catch {
+    // Read failed — treat as transient (leave claimed for retry).
+  }
+  return null
 }
 
 /// Ensures the intent is registered on-chain. Returns the bytes32 id used.
