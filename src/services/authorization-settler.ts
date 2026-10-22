@@ -34,6 +34,7 @@ import {
   type Address,
   BaseError,
   ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
   decodeAbiParameters,
   formatEther,
   type Hex,
@@ -191,6 +192,12 @@ function isPermanentError(err: unknown): boolean {
   // Refused by the deploy policy before anything was sent: retrying the same
   // authorization would be refused again, identically.
   if (err instanceof DeployPolicyError) return true
+  // Una reversión que es de todos y no de esta autorización —el hub en pausa,
+  // la firma del registro que no cuadra con el firmante configurado— no se
+  // castiga rechazándola: el pagador tendría que volver a firmar por algo que
+  // no es suyo, y cuando se arregle valdría la misma firma.
+  const motivo = motivoDeReversion(err)
+  if (motivo !== null && REVERSIONES_DE_TODOS.has(motivo)) return false
   // Our own signal: the tx mined and reverted (see registerIntent /
   // submitPayment). Retrying the same authorization is futile.
   if (err instanceof Error && err.message.includes('_reverted:')) return true
@@ -202,6 +209,28 @@ function isPermanentError(err: unknown): boolean {
   }
   return false
 }
+
+/// El nombre del error con que revirtió el contrato, si lo que falló fue el
+/// contrato. `null` si no fue una reversión (RPC, red, tiempo de espera): eso no
+/// dice nada de lo que se intentaba.
+function motivoDeReversion(err: unknown): string | null {
+  if (!(err instanceof BaseError)) return null
+  const revertido = err.walk((e) => e instanceof ContractFunctionRevertedError)
+  if (!(revertido instanceof ContractFunctionRevertedError)) return null
+  return revertido.data?.errorName ?? revertido.signature ?? 'reverted'
+}
+
+/// Reversiones de `registerIntent` que dependen solo del registro: si un
+/// registro las da, no pasará nunca, lo envíe quien lo envíe.
+const REVERSIONES_DEL_REGISTRO = new Set([
+  'InvalidExpiry',
+  'ZeroAddress',
+  'ZeroAmount',
+  'AmountTooLarge',
+])
+
+/// Reversiones que afectan a todos a la vez. Por ellas no se rechaza a nadie.
+const REVERSIONES_DE_TODOS = new Set(['EnforcedPause', 'InvalidIntentSignature'])
 
 /// API claim-batch response — a wrapper around an array of claimed
 /// authorizations (the same shape `ClaimResponse` describes for a single
@@ -499,44 +528,15 @@ async function settleBatch(ctx: SettlerContext, claimed: ClaimResponse[]): Promi
     )
 
     if (needRegister.length > 0) {
-      // Los registros llegan firmados por el API (ADR-004): se envían tal
-      // cual, sin reconstruirlos desde la configuración local.
-      const regs = needRegister.map((c) => ({
-        intentId: c.registration.intent_id,
-        merchant: c.registration.merchant,
-        operator: c.registration.operator,
-        amount: BigInt(c.registration.amount),
-        expiresAt: BigInt(c.registration.expires_at),
-        signature: c.registration.signature,
-      }))
-      const intentIds = regs.map((r) => r.intentId)
-
-      const regTxHash = await ctx.hubClients.walletClient.writeContract({
-        address: ctx.hubClients.settlementHubAddress,
-        abi: SETTLEMENT_HUB_ABI,
-        functionName: 'registerIntentBatch',
-        args: [regs],
-        account: ctx.hubClients.account,
-        chain: null,
-      })
-
-      const regReceipt = await ctx.hubClients.publicClient.waitForTransactionReceipt({
-        hash: regTxHash,
-      })
-      if (regReceipt.status !== 'success') {
-        throw new Error(`registerIntentBatch_reverted: ${regTxHash}`)
+      const apartados = await registrarConAislamiento(ctx, needRegister)
+      // Lo apartado no entra en el cobro de esta vuelta: o se rechazó, o queda
+      // reclamado para otra.
+      for (let i = claimedList.length - 1; i >= 0; i--) {
+        if (apartados.has((claimedList[i] as ClaimResponse).authorization.id)) {
+          claimedList.splice(i, 1)
+        }
       }
-
-      // All intents registered in the same tx/block — waiting for one to
-      // be visible on the read path is enough to guard the read-after-write
-      // gap before payIntentBatchWithAuthorization estimates gas.
-      const firstOnChainId = intentIds[0]
-      if (firstOnChainId) await waitForIntentVisible(ctx, firstOnChainId)
-
-      ctx.logger.info(
-        { count: needRegister.length, tx_hash: regTxHash },
-        '[settler] registerIntentBatch confirmed',
-      )
+      if (claimedList.length === 0) return
     }
 
     // ── Settle every authorization in one batch tx ────────────────
@@ -600,6 +600,124 @@ async function settleBatch(ctx: SettlerContext, claimed: ClaimResponse[]): Promi
       { count: claimedList.length, reason: reason.slice(0, 300) },
       '[settler] Batch settle failed — leaving claims for sweeper re-drive',
     )
+  }
+}
+
+/// Registra en una sola transacción los intents de `pendientes`. Lanza si el
+/// lote revierte, al estimar el gas o ya minado.
+async function registrarLote(ctx: SettlerContext, pendientes: ClaimResponse[]): Promise<void> {
+  // Los registros llegan firmados por el API (ADR-004): se envían tal cual,
+  // sin reconstruirlos desde la configuración local.
+  const regs = pendientes.map(registroDe)
+  const regTxHash = await ctx.hubClients.walletClient.writeContract({
+    address: ctx.hubClients.settlementHubAddress,
+    abi: SETTLEMENT_HUB_ABI,
+    functionName: 'registerIntentBatch',
+    args: [regs],
+    account: ctx.hubClients.account,
+    chain: null,
+  })
+
+  const regReceipt = await ctx.hubClients.publicClient.waitForTransactionReceipt({
+    hash: regTxHash,
+  })
+  if (regReceipt.status !== 'success') {
+    throw new Error(`registerIntentBatch_reverted: ${regTxHash}`)
+  }
+
+  // All intents registered in the same tx/block — waiting for one to
+  // be visible on the read path is enough to guard the read-after-write
+  // gap before payIntentBatchWithAuthorization estimates gas.
+  const firstOnChainId = regs[0]?.intentId
+  if (firstOnChainId) await waitForIntentVisible(ctx, firstOnChainId)
+
+  ctx.logger.info(
+    { count: regs.length, tx_hash: regTxHash },
+    '[settler] registerIntentBatch confirmed',
+  )
+}
+
+function registroDe(c: ClaimResponse) {
+  return {
+    intentId: c.registration.intent_id,
+    merchant: c.registration.merchant,
+    operator: c.registration.operator,
+    amount: BigInt(c.registration.amount),
+    expiresAt: BigInt(c.registration.expires_at),
+    signature: c.registration.signature,
+  }
+}
+
+/// Registra los intents del lote y devuelve las autorizaciones que se apartan
+/// de esta vuelta.
+///
+/// `registerIntentBatch` revierte entero si un solo registro es inválido: no lo
+/// salta, como sí hace el lote de pagos. Sin apartarlo, ese registro volvería a
+/// la cola —que reparte primero lo más antiguo— y hundiría cada lote en que
+/// entrase, para todos los comercios (OCT-01). Si el lote falla, se prueba
+/// cada registro por separado:
+///
+/// - el contrato lo rechaza por algo **suyo** (`REVERSIONES_DEL_REGISTRO`): se
+///   rechaza la autorización, porque no pasará nunca;
+/// - lo rechaza por algo **de todos**, o no responde: sale de esta vuelta sin
+///   rechazarla, y se reintenta en otra;
+/// - pasa: se registra con los demás que pasan.
+///
+/// Si cada registro pasaría solo y aun así el lote falló, no hay a quién
+/// apartar (una carrera, el nonce de la cuenta, el RPC): se relanza, como antes,
+/// y todo queda reclamado para otra vuelta. Los que ya estaban registrados se
+/// cobran igual aunque los demás se aparten: la pausa no bloquea los pagos.
+async function registrarConAislamiento(
+  ctx: SettlerContext,
+  pendientes: ClaimResponse[],
+): Promise<Set<string>> {
+  try {
+    await registrarLote(ctx, pendientes)
+    return new Set()
+  } catch (err) {
+    const apartados = new Set<string>()
+    const pasan: ClaimResponse[] = []
+    for (const c of pendientes) {
+      const motivo = await motivoParaNoRegistrar(ctx, c)
+      if (motivo === null) {
+        pasan.push(c)
+        continue
+      }
+      apartados.add(c.authorization.id)
+      const datos = { auth_id: c.authorization.id, intent_id: c.intent.intent_id, motivo }
+      if (REVERSIONES_DEL_REGISTRO.has(motivo)) {
+        ctx.logger.warn(datos, '[settler] Registration the contract will never accept — rejected')
+        await rejectAuthorization(ctx, c.authorization.id, `registration_refused: ${motivo}`)
+      } else {
+        ctx.logger.warn(
+          datos,
+          '[settler] Registration failed, not for its own sake — left for a later cycle',
+        )
+      }
+    }
+    if (apartados.size === 0) throw err
+    if (pasan.length > 0) await registrarLote(ctx, pasan)
+    return apartados
+  }
+}
+
+/// `null` si el registro pasaría solo. Si no, por qué no: el nombre del error
+/// del contrato, o `rpc` si la simulación misma no se pudo hacer.
+async function motivoParaNoRegistrar(
+  ctx: SettlerContext,
+  c: ClaimResponse,
+): Promise<string | null> {
+  try {
+    await ctx.hubClients.publicClient.simulateContract({
+      address: ctx.hubClients.settlementHubAddress,
+      abi: SETTLEMENT_HUB_ABI,
+      functionName: 'registerIntent',
+      args: [registroDe(c)],
+      account: ctx.hubClients.account,
+    })
+    return null
+  } catch (err) {
+    return motivoDeReversion(err) ?? 'rpc'
   }
 }
 
