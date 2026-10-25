@@ -4,8 +4,10 @@ import { createDaemonChainClients, isDevChainConfig } from './lib/chain-client'
 import { loadConfig } from './lib/config'
 import { InternalApiClient } from './lib/internal-api-client'
 import { initNodeStatus } from './lib/node-status'
+import { VERSION } from './lib/version'
 import { healthRoute, infoRoute } from './routes/health'
 import { startAuthorizationSettler } from './services/authorization-settler'
+import { startFeeClaimer } from './services/fee-claimer'
 import { ConfiguracionIncorrecta, preflight } from './services/preflight'
 
 const config = loadConfig()
@@ -75,11 +77,18 @@ async function start() {
   })
   app.addHook('onClose', () => stopSettler())
 
+  // La comisión del nodeit queda acreditada en el hub (ADR-009 §1): este
+  // servicio la cobra por tandas.
+  if (hubClients) {
+    const stopFeeClaimer = startFeeClaimer({ config, hubClients, logger: app.log })
+    app.addHook('onClose', () => stopFeeClaimer())
+  }
+
   // No event watcher: the API reads IntentSettled from the hub itself and
   // does not take a node's word for what settled (F-5, ADR-007).
 
   await app.listen({ port: config.port, host: '0.0.0.0' })
-  app.log.info('CoatiPay Node v0.1.0')
+  app.log.info(`CoatiPay Node v${VERSION}`)
   app.log.info(`Operator: ${config.operatorAddress}`)
   app.log.info(`Endpoint: ${config.endpoint}`)
 }

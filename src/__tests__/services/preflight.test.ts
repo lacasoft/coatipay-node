@@ -3,7 +3,10 @@ import {
   ContractFunctionExecutionError,
   ContractFunctionRevertedError,
   ContractFunctionZeroDataError,
+  encodeAbiParameters,
+  type Hex,
   HttpRequestError,
+  keccak256,
 } from 'viem'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DaemonChainClients } from '../../lib/chain-client'
@@ -50,11 +53,22 @@ const caida = (fn: string) =>
 
 /// Lo que la cadena responde a cada lectura; un `Error` se lanza.
 let cadena: Record<string, unknown>
-const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
-  const r = cadena[functionName]
-  if (r instanceof Error) throw r
-  return r
-})
+/// Lo que calcula SettlementHub.intentIdOf (ADR-009 §3).
+const intentIdOfDelHub = (merchant: Hex, ref: Hex) =>
+  keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'bytes32' }], [merchant, ref]))
+
+const readContract = vi.fn(
+  async ({ functionName, args }: { functionName: string; args?: readonly unknown[] }) => {
+    const r = cadena[functionName]
+    if (r instanceof Error) throw r
+    // Un hub de ADR-009 calcula el id; un valor fijo en `cadena` lo sustituye.
+    if (functionName === 'intentIdOf' && r === undefined) {
+      const [merchant, ref] = args as [Hex, Hex]
+      return intentIdOfDelHub(merchant, ref)
+    }
+    return r
+  },
+)
 const clients = {
   publicClient: { readContract },
   settlementHubAddress: HUB,
@@ -163,6 +177,18 @@ describe('preflight — el hub, su USDC y el registro', () => {
     await expect(preflight(clients, config, logger, redes())).resolves.toBe('ok')
   })
 
+  it('un hub anterior a ADR-009 (sin intentIdOf) no arranca', async () => {
+    cadena.intentIdOf = sinContrato('intentIdOf')
+    await expect(preflight(clients, config, logger, redes())).rejects.toThrow(/anterior a ADR-009/)
+  })
+
+  it('un hub que calcula otro id on-chain no arranca', async () => {
+    cadena.intentIdOf = `0x${'ab'.repeat(32)}`
+    await expect(preflight(clients, config, logger, redes())).rejects.toThrow(
+      /calcula otro id on-chain/,
+    )
+  })
+
   it('un nodeit inactivo en el registro no arranca', async () => {
     cadena.isActive = false
     await expect(preflight(clients, config, logger, redes())).rejects.toThrow(/no está activo/)
@@ -177,7 +203,7 @@ describe('preflight — el hub, su USDC y el registro', () => {
 })
 
 describe('preflight — una caída no es un error de configuración', () => {
-  it.each([['intentSigner'], ['usdc'], ['isActive']])(
+  it.each([['intentSigner'], ['usdc'], ['intentIdOf'], ['isActive']])(
     'si %s() no responde, devuelve sin_respuesta y no lanza',
     async (fn) => {
       cadena[fn] = caida(fn)

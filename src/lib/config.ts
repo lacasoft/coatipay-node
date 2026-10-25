@@ -60,6 +60,11 @@ const ConfigSchema = z
     /// Gas price (gwei) at which `minPaymentAmount` was calibrated. The live gas
     /// price is compared against this to scale the floor. GAS_PRICE_REF_GWEI.
     gasPriceRefGwei: z.coerce.number().positive().default(DEFAULT_GAS_PRICE_REF_GWEI),
+    /// Desde cuánta comisión acreditada (unidades base de USDC) la cobra el
+    /// nodo con `claim()`. El hub acredita la comisión de cada pago en lugar de
+    /// transferirla (ADR-009 §1); cobrarla cuesta una transacción (~60k de gas),
+    /// así que se junta antes. FEE_CLAIM_MIN_AMOUNT; 1 USDC por defecto.
+    feeClaimMinAmount: z.coerce.number().int().positive().default(1_000_000),
     /// A held (currently-unprofitable) authorization this close to its
     /// `validBefore` is rejected as uneconomical instead of retried — it won't
     /// become profitable before it expires. Seconds. SETTLE_EXPIRY_BUFFER_SECONDS.
@@ -170,6 +175,7 @@ const VARIABLES: Record<keyof z.input<typeof ConfigSchema>, string> = {
   apiUrl: 'API_INTERNAL_URL',
   minPaymentAmount: 'MIN_PAYMENT_AMOUNT',
   gasPriceRefGwei: 'GAS_PRICE_REF_GWEI',
+  feeClaimMinAmount: 'FEE_CLAIM_MIN_AMOUNT',
   settleExpiryBufferSeconds: 'SETTLE_EXPIRY_BUFFER_SECONDS',
 }
 
@@ -195,6 +201,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     apiUrl: env.API_INTERNAL_URL,
     minPaymentAmount: env.MIN_PAYMENT_AMOUNT,
     gasPriceRefGwei: env.GAS_PRICE_REF_GWEI,
+    feeClaimMinAmount: env.FEE_CLAIM_MIN_AMOUNT,
     settleExpiryBufferSeconds: env.SETTLE_EXPIRY_BUFFER_SECONDS,
   })
   if (!resultado.success) {
