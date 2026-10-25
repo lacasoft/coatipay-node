@@ -42,7 +42,7 @@ describe('mensajeDelCanal — lo que firma el operador (canal v2)', () => {
       }),
     ).toBe(
       [
-        'coatipay-operator-channel/2',
+        'coatipay-operator-channel/3',
         '1790000000',
         '000102030405060708090a0b0c0d0e0f',
         'POST',
@@ -118,15 +118,15 @@ describe('InternalApiClient.post', () => {
 
   it('la API habla otro canal: el error lo dice, con qué hacer', async () => {
     mockFetch.mockResolvedValueOnce(
-      respuesta(403, { error: { code: 'forbidden' } }, { 'X-Operator-Channel': '3' }),
+      respuesta(403, { error: { code: 'forbidden' } }, { 'X-Operator-Channel': '4' }),
     )
     const err = (await cliente()
       .post('/v1/internal/authorizations/claim', {})
       .catch((e: unknown) => e)) as InternalApiError
 
     expect(err).toBeInstanceOf(InternalApiError)
-    expect(err.canalDeLaApi).toBe('3')
-    expect(err.message).toMatch(/La API habla el canal v3 y este nodo el v2: actualiza el nodo/)
+    expect(err.canalDeLaApi).toBe('4')
+    expect(err.message).toMatch(/La API habla el canal v4 y este nodo el v3: actualiza el nodo/)
   })
 
   it('si la API va por detrás de este nodo, no le dice que se actualice', async () => {

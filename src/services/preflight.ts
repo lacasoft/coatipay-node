@@ -1,6 +1,6 @@
-import { CHAIN_IDS, resolveRpcUrls } from '@lacasoft/coatipay-protocol'
+import { CHAIN_IDS, intentIdOf, intentRef, resolveRpcUrls } from '@lacasoft/coatipay-protocol'
 import type { FastifyBaseLogger } from 'fastify'
-import { type Address, createPublicClient, http, isAddressEqual } from 'viem'
+import { type Address, createPublicClient, type Hex, http, isAddressEqual } from 'viem'
 import type { DaemonChainClients } from '../lib/chain-client'
 import type { Config } from '../lib/config'
 import { SETTLEMENT_HUB_ABI } from '../lib/settlement-hub-abi'
@@ -177,6 +177,29 @@ export async function preflight(
     if (!isAddressEqual(usdcDelHub, config.usdcAddress as Address)) {
       throw new ConfiguracionIncorrecta(
         `USDC_ADDRESS (${config.usdcAddress}) no es el USDC del hub (${usdcDelHub}).`,
+      )
+    }
+
+    // ── 3b. ¿El hub calcula el id on-chain como la API? (ADR-009 §3) ──
+    // Un hub anterior no tiene `intentIdOf`: con él, cada registro que entrega
+    // la API tendría otra forma y el pago no saldría.
+    const comercioDePrueba = '0x0000000000000000000000000000000000000001' as Address
+    const idDelHub = (await leer(
+      () =>
+        clients.publicClient.readContract({
+          address: hub,
+          abi: SETTLEMENT_HUB_ABI,
+          functionName: 'intentIdOf',
+          args: [comercioDePrueba, intentRef('preflight')],
+        }),
+      `SETTLEMENT_HUB_ADDRESS (${hub}) es un SettlementHub anterior a ADR-009: este nodo ` +
+        'habla con el hub nuevo. Apunta al hub nuevo (y a su NODE_REGISTRY_ADDRESS), o usa ' +
+        'la versión del nodo de ese despliegue.',
+    )) as Hex
+    if (idDelHub.toLowerCase() !== intentIdOf(comercioDePrueba, 'preflight').toLowerCase()) {
+      throw new ConfiguracionIncorrecta(
+        `El hub calcula otro id on-chain (${idDelHub}) que este nodo para el mismo cobro: la ` +
+          'versión del paquete del protocolo no es la de los contratos desplegados.',
       )
     }
 

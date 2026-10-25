@@ -1,23 +1,30 @@
+import { intentIdOf, intentRef } from '@lacasoft/coatipay-protocol'
 import {
   ContractFunctionExecutionError,
   ContractFunctionRevertedError,
   encodeAbiParameters,
   encodeErrorResult,
+  encodeEventTopics,
   encodeFunctionData,
   erc20Abi,
   type Hex,
+  keccak256,
 } from 'viem'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DaemonChainClients } from '../../lib/chain-client'
 import { InternalApiClient, InternalApiError } from '../../lib/internal-api-client'
 import { computeHealth, initNodeStatus } from '../../lib/node-status'
-import { intentIdToBytes32, SETTLEMENT_HUB_ABI } from '../../lib/settlement-hub-abi.js'
+import { SETTLEMENT_HUB_ABI } from '../../lib/settlement-hub-abi.js'
 import { startAuthorizationSettler } from '../../services/authorization-settler'
 
 const HUB = '0x1111111111111111111111111111111111111111' as `0x${string}`
 const OPERATOR = '0x2222222222222222222222222222222222222222' as `0x${string}`
 const PAYER = '0x3333333333333333333333333333333333333333' as `0x${string}`
 const MERCHANT = '0x4444444444444444444444444444444444444444' as `0x${string}`
+
+/// El id on-chain de un cobro de prueba: el que calculará el hub con la cartera
+/// del comercio (ADR-009 §3), y el que el pagador firmó como nonce.
+const idDe = (intentId: string) => intentIdOf(MERCHANT, intentId)
 
 const baseConfig = {
   port: 4000,
@@ -34,6 +41,7 @@ const baseConfig = {
   apiUrl: 'http://localhost:3000',
   minPaymentAmount: 0, // floor disabled by default; specific tests override
   gasPriceRefGwei: 0.02,
+  feeClaimMinAmount: 1_000_000,
   settleExpiryBufferSeconds: 300,
 }
 
@@ -87,7 +95,8 @@ function makeClaimResponse(
       payer_address: PAYER,
       valid_after: '0',
       valid_before: '9999999999',
-      nonce: '0xabcd000000000000000000000000000000000000000000000000000000000000',
+      // El pagador firma el id on-chain como nonce (ADR-004, ADR-009).
+      nonce: idDe(intentId) as Hex,
       signature: overrides.signature ?? `0x${'ab'.repeat(65)}`,
     },
     intent: {
@@ -99,7 +108,8 @@ function makeClaimResponse(
     },
     // El API firma el registro (ADR-004); el daemon lo reenvía tal cual.
     registration: {
-      intent_id: intentIdToBytes32(intentId),
+      ref: intentRef(intentId),
+      intent_id: idDe(intentId),
       merchant: MERCHANT,
       operator: OPERATOR,
       amount: '5000000',
@@ -688,9 +698,7 @@ describe('startAuthorizationSettler', () => {
       logger: mockLogger as never,
     })
     await vi.advanceTimersByTimeAsync(5_001)
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0)
     stop()
 
     const writeCalls = (hubClients.walletClient.writeContract as ReturnType<typeof vi.fn>).mock
@@ -741,8 +749,8 @@ describe('startAuthorizationSettler', () => {
         if (entregado) return null
         entregado = true
         return batchOf(
-          makeClaimResponse({ id: 'pa_1', intentId: 'pi_1', onChainId: intentIdToBytes32('pi_1') }),
-          makeClaimResponse({ id: 'pa_2', intentId: 'pi_2', onChainId: intentIdToBytes32('pi_2') }),
+          makeClaimResponse({ id: 'pa_1', intentId: 'pi_1', onChainId: idDe('pi_1') }),
+          makeClaimResponse({ id: 'pa_2', intentId: 'pi_2', onChainId: idDe('pi_2') }),
         )
       },
     )
@@ -1004,11 +1012,12 @@ describe('economic guard (never settle at a loss)', () => {
         payer_address: PAYER,
         valid_after: '0',
         valid_before: String(validBefore),
-        nonce: '0xabcd000000000000000000000000000000000000000000000000000000000000',
+        nonce: idDe('pi_low') as Hex,
         signature: `0x${'ab'.repeat(65)}`,
       },
       registration: {
-        intent_id: intentIdToBytes32('pi_low'),
+        ref: intentRef('pi_low'),
+        intent_id: idDe('pi_low'),
         merchant: MERCHANT,
         operator: OPERATOR,
         amount,
@@ -1299,7 +1308,7 @@ describe('regresión · el settler solo despliega con la fábrica permitida', ()
   })
 })
 
-describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
+describe('un registro que no pasa no hunde el lote (OCT-01, ADR-009 §2)', () => {
   type NombreDeError =
     | 'InvalidExpiry'
     | 'ZeroAddress'
@@ -1322,6 +1331,35 @@ describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
       { abi: SETTLEMENT_HUB_ABI, functionName, args: [], contractAddress: HUB },
     )
 
+  /// El evento con que el hub dice que saltó un registro, tal como llega en el
+  /// recibo.
+  const saltado = (intentId: Hex, errorName: NombreDeError) => ({
+    address: HUB,
+    topics: encodeEventTopics({
+      abi: SETTLEMENT_HUB_ABI,
+      eventName: 'IntentRegistrationSkipped',
+      args: { intentId },
+    }),
+    data: encodeAbiParameters(
+      [{ type: 'bytes' }],
+      [encodeErrorResult({ abi: SETTLEMENT_HUB_ABI, errorName })],
+    ),
+  })
+
+  /// El evento de un pago liquidado, tal como llega en el recibo.
+  const liquidado = (intentId: Hex) => ({
+    address: HUB,
+    topics: encodeEventTopics({
+      abi: SETTLEMENT_HUB_ABI,
+      eventName: 'IntentSettled',
+      args: { intentId, payer: PAYER },
+    }),
+    data: encodeAbiParameters(
+      [{ type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }],
+      [4_925_000n, 52_500n, 22_500n],
+    ),
+  })
+
   const noRegistrado = {
     merchant: '0x0000000000000000000000000000000000000000',
     amount: 0n,
@@ -1330,48 +1368,83 @@ describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
     status: 0,
   }
 
-  /// Un hub de mentira que se comporta como el de verdad en lo que importa
-  /// aquí: `registerIntentBatch` revierte ENTERO si un solo registro no pasa, y
-  /// `registerIntent` se puede simular uno a uno.
-  function hubQueRechaza(
-    malos: Record<string, NombreDeError | 'rpc'>,
-    yaRegistrados: string[] = [],
-  ) {
-    const registrados = new Set<string>(yaRegistrados.map((id) => intentIdToBytes32(id)))
+  /// El id que calcula el hub para un registro: `intentIdOf(merchant, ref)`.
+  const idDelRegistro = (r: { merchant: Hex; ref: Hex }) =>
+    keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'bytes32' }], [r.merchant, r.ref]))
+
+  /// Un hub de mentira que se comporta como el de ADR-009 en lo que importa
+  /// aquí: `registerIntentBatch` salta el registro que no pasa —con su
+  /// evento— y registra los demás; solo lo que es de todos (la pausa) lo hace
+  /// revertir entero. `registerIntent` se puede simular uno a uno.
+  function hubDeAdr009(malos: Record<string, NombreDeError | 'rpc'>, yaRegistrados: string[] = []) {
+    const registrados = new Set<string>(yaRegistrados.map((id) => idDe(id).toLowerCase()))
     const malosPorId = new Map<string, NombreDeError | 'rpc'>(
-      Object.entries(malos).map(([id, e]) => [intentIdToBytes32(id), e]),
+      Object.entries(malos).map(([id, e]) => [idDe(id).toLowerCase(), e]),
     )
     const lotesDeRegistro: string[][] = []
     const lotesDePago: string[][] = []
+    let saltadosDelUltimo: ReturnType<typeof saltado>[] = []
+    let pagadosDelUltimo: ReturnType<typeof liquidado>[] = []
+    const deTodos = (ids: string[]) =>
+      ids.map((id) => malosPorId.get(id)).find((e) => e === 'EnforcedPause' || e === 'rpc')
     const hubClients = buildHubClients({
       publicClient: {
         getBalance: vi.fn().mockResolvedValue(10n ** 18n),
         readContract: vi.fn(async ({ args }: { args: [string] }) =>
-          registrados.has(args[0])
+          registrados.has(args[0].toLowerCase())
             ? { ...noRegistrado, merchant: MERCHANT, operator: OPERATOR }
             : noRegistrado,
         ),
-        waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: 'success' }),
-        simulateContract: vi.fn(async ({ args }: { args: [{ intentId: string }] }) => {
-          const malo = malosPorId.get(args[0].intentId)
-          if (malo === 'rpc') throw new Error('fetch failed')
-          if (malo) throw revertDelHub(malo, 'registerIntent')
-          return { result: undefined }
-        }),
+        waitForTransactionReceipt: vi.fn(async ({ hash }: { hash: string }) =>
+          hash === '0xreg'
+            ? { status: 'success', logs: saltadosDelUltimo }
+            : { status: 'success', logs: pagadosDelUltimo },
+        ),
+        simulateContract: vi.fn(
+          async ({ functionName, args }: { functionName: string; args: [unknown] }) => {
+            if (functionName === 'registerIntentBatch') {
+              const ids = (args[0] as { merchant: Hex; ref: Hex }[]).map((r) =>
+                idDelRegistro(r).toLowerCase(),
+              )
+              const comun = deTodos(ids)
+              if (comun === 'rpc') throw new Error('fetch failed')
+              if (comun) throw revertDelHub(comun, 'registerIntentBatch')
+              return { result: BigInt(ids.filter((id) => !malosPorId.has(id)).length) }
+            }
+            if (functionName === 'registerIntent') {
+              const malo = malosPorId.get(
+                idDelRegistro(args[0] as { merchant: Hex; ref: Hex }).toLowerCase(),
+              )
+              if (malo === 'rpc') throw new Error('fetch failed')
+              if (malo) throw revertDelHub(malo, 'registerIntent')
+              return { result: undefined }
+            }
+            return { result: 1n } // el lote de pagos liquidaría
+          },
+        ),
       } as never,
       walletClient: {
         writeContract: vi.fn(
           async ({ functionName, args }: { functionName: string; args: [unknown[]] }) => {
             if (functionName === 'registerIntentBatch') {
-              const ids = (args[0] as { intentId: string }[]).map((r) => r.intentId)
+              const ids = (args[0] as { merchant: Hex; ref: Hex }[]).map((r) =>
+                idDelRegistro(r).toLowerCase(),
+              )
               lotesDeRegistro.push(ids)
-              const primero = ids.map((id) => malosPorId.get(id)).find((e) => e !== undefined)
-              if (primero === 'rpc') throw new Error('fetch failed')
-              if (primero) throw revertDelHub(primero, 'registerIntentBatch')
-              for (const id of ids) registrados.add(id)
+              saltadosDelUltimo = []
+              for (const id of ids) {
+                const malo = malosPorId.get(id)
+                if (malo && malo !== 'rpc' && malo !== 'EnforcedPause') {
+                  saltadosDelUltimo.push(saltado(id as Hex, malo))
+                } else {
+                  registrados.add(id)
+                }
+              }
               return '0xreg' as Hex
             }
-            lotesDePago.push((args[0] as { intentId: string }[]).map((a) => a.intentId))
+            const pagados = (args[0] as { intentId: string }[]).map((a) => a.intentId.toLowerCase())
+            lotesDePago.push(pagados)
+            pagadosDelUltimo = pagados.map((p) => liquidado(p as Hex))
             return '0xpay' as Hex
           },
         ),
@@ -1409,9 +1482,10 @@ describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
   }
 
   const claim = (n: string) => makeClaimResponse({ id: `pa_${n}`, intentId: `pi_${n}` })
+  const id = (n: string) => idDe(`pi_${n}`).toLowerCase()
 
-  it('el registro que el contrato nunca aceptará se rechaza; los demás se registran y se cobran', async () => {
-    const { hubClients, lotesDeRegistro, lotesDePago } = hubQueRechaza({ pi_malo: 'InvalidExpiry' })
+  it('el hub salta el registro que nunca aceptará: se rechaza; los demás se registran en el mismo lote y se cobran', async () => {
+    const { hubClients, lotesDeRegistro, lotesDePago } = hubDeAdr009({ pi_malo: 'InvalidExpiry' })
 
     const rechazos = await unaVuelta(hubClients, claim('1'), claim('malo'), claim('2'))
 
@@ -1421,14 +1495,13 @@ describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
         body: { reason: 'registration_refused: InvalidExpiry' },
       },
     ])
-    // El primer lote revierte entero; el segundo, sin el malo, pasa.
-    expect(lotesDeRegistro).toHaveLength(2)
-    expect(lotesDeRegistro[1]).toEqual([intentIdToBytes32('pi_1'), intentIdToBytes32('pi_2')])
-    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_1'), intentIdToBytes32('pi_2')]])
+    // Un solo lote de registro: el hub ya no revierte entero.
+    expect(lotesDeRegistro).toEqual([[id('1'), id('malo'), id('2')]])
+    expect(lotesDePago).toEqual([[id('1'), id('2')]])
   })
 
   it('las demás causas propias del registro también son rechazo: dirección cero, importe excesivo', async () => {
-    const { hubClients, lotesDePago } = hubQueRechaza({
+    const { hubClients, lotesDePago } = hubDeAdr009({
       pi_a: 'ZeroAddress',
       pi_b: 'AmountTooLarge',
     })
@@ -1439,20 +1512,20 @@ describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
       '/v1/internal/authorizations/pa_a/rejected',
       '/v1/internal/authorizations/pa_b/rejected',
     ])
-    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_1')]])
+    expect(lotesDePago).toEqual([[id('1')]])
   })
 
-  it('una firma de registro que no cuadra no se rechaza: sale de esta vuelta y los demás se cobran', async () => {
-    const { hubClients, lotesDePago } = hubQueRechaza({ pi_malo: 'InvalidIntentSignature' })
+  it('una firma de registro que el gate no acepta no se rechaza: sale de esta vuelta y los demás se cobran', async () => {
+    const { hubClients, lotesDePago } = hubDeAdr009({ pi_malo: 'InvalidIntentSignature' })
 
     const rechazos = await unaVuelta(hubClients, claim('1'), claim('malo'))
 
     expect(rechazos).toEqual([])
-    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_1')]])
+    expect(lotesDePago).toEqual([[id('1')]])
   })
 
-  it('con el hub en pausa no se rechaza a nadie, y lo ya registrado se cobra igual', async () => {
-    const { hubClients, lotesDeRegistro, lotesDePago } = hubQueRechaza(
+  it('con el hub en pausa no se envía el lote de registro, no se rechaza a nadie, y lo ya registrado se cobra igual', async () => {
+    const { hubClients, lotesDeRegistro, lotesDePago } = hubDeAdr009(
       { pi_nuevo: 'EnforcedPause' },
       ['pi_viejo'],
     )
@@ -1460,22 +1533,36 @@ describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
     const rechazos = await unaVuelta(hubClients, claim('viejo'), claim('nuevo'))
 
     expect(rechazos).toEqual([])
-    expect(lotesDeRegistro).toEqual([[intentIdToBytes32('pi_nuevo')]])
+    expect(lotesDeRegistro).toEqual([])
     // La pausa bloquea registros, no pagos.
-    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_viejo')]])
+    expect(lotesDePago).toEqual([[id('viejo')]])
   })
 
-  it('si la simulación misma falla (RPC), tampoco se rechaza', async () => {
-    const { hubClients, lotesDePago } = hubQueRechaza({ pi_malo: 'rpc' })
+  it('si la simulación del lote falla (RPC), tampoco se rechaza, y lo ya registrado se cobra', async () => {
+    const { hubClients, lotesDePago } = hubDeAdr009({ pi_malo: 'rpc' }, ['pi_1'])
 
     const rechazos = await unaVuelta(hubClients, claim('1'), claim('malo'))
 
     expect(rechazos).toEqual([])
-    expect(lotesDePago).toEqual([[intentIdToBytes32('pi_1')]])
+    expect(lotesDePago).toEqual([[id('1')]])
   })
 
-  it('si cada registro pasaría solo y el lote falla igual, se reintenta entero y no se rechaza a nadie', async () => {
-    const { hubClients, lotesDePago } = hubQueRechaza({})
+  it('si el lote no registraría ninguno, no se envía: se nombra el motivo de cada uno, sin gastar gas', async () => {
+    const { hubClients, lotesDeRegistro, lotesDePago } = hubDeAdr009({
+      pi_a: 'InvalidExpiry',
+      pi_b: 'InvalidIntentSignature',
+    })
+
+    const rechazos = await unaVuelta(hubClients, claim('a'), claim('b'))
+
+    expect(lotesDeRegistro).toEqual([])
+    expect(lotesDePago).toEqual([])
+    // El que nunca pasará se rechaza; el de la firma, no.
+    expect(rechazos.map((r) => r.path)).toEqual(['/v1/internal/authorizations/pa_a/rejected'])
+  })
+
+  it('si el lote falla al enviarse, se reintenta entero y no se rechaza a nadie', async () => {
+    const { hubClients, lotesDePago } = hubDeAdr009({})
     ;(hubClients.walletClient.writeContract as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error('nonce too low'),
     )
@@ -1484,6 +1571,75 @@ describe('un registro que no pasa no hunde el lote (OCT-01)', () => {
 
     expect(rechazos).toEqual([])
     expect(lotesDePago).toEqual([])
+  })
+})
+
+describe('lo que la API entrega tiene que cuadrar (ADR-009 §3)', () => {
+  async function conUnReclamo(c: ReturnType<typeof makeClaimResponse>) {
+    const hubClients = buildHubClients()
+    const { api, postCalls } = buildApiMock()
+    let primera = true
+    ;(api as unknown as { post: (p: string, b: unknown) => Promise<unknown> }).post = vi.fn(
+      async (path: string, body: unknown) => {
+        postCalls.push({ path, body })
+        if (primera && path.endsWith('/claim-batch')) {
+          primera = false
+          return batchOf(c)
+        }
+        return path.endsWith('/claim-batch') ? { authorizations: [] } : null
+      },
+    )
+    const stop = startAuthorizationSettler({
+      config: baseConfig,
+      hubClients,
+      api,
+      logger: mockLogger as never,
+    })
+    await vi.advanceTimersByTimeAsync(5_001)
+    for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(0)
+    stop()
+    return { rechazos: postCalls.filter((p) => p.path.endsWith('/rejected')), hubClients }
+  }
+
+  it('un intent_id que no es intentIdOf(comercio, id): se rechaza sin enviar nada', async () => {
+    const c = makeClaimResponse()
+    c.registration.intent_id = intentIdOf('0x5555555555555555555555555555555555555555', 'pi_test')
+    const { rechazos, hubClients } = await conUnReclamo(c)
+    expect(rechazos.map((r) => (r.body as { reason: string }).reason)).toEqual([
+      'incoherent_claim: intent_id',
+    ])
+    expect(hubClients.walletClient.writeContract).not.toHaveBeenCalled()
+  })
+
+  it('un nonce que no es ese id: se rechaza sin enviar nada', async () => {
+    const c = makeClaimResponse()
+    c.authorization.nonce = idDe('pi_otro') as Hex
+    const { rechazos, hubClients } = await conUnReclamo(c)
+    expect(rechazos.map((r) => (r.body as { reason: string }).reason)).toEqual([
+      'incoherent_claim: nonce',
+    ])
+    expect(hubClients.walletClient.writeContract).not.toHaveBeenCalled()
+  })
+
+  it('un ref que no es el del id: se rechaza sin enviar nada', async () => {
+    const c = makeClaimResponse()
+    c.registration.ref = intentRef('pi_otro')
+    const { rechazos } = await conUnReclamo(c)
+    expect(rechazos.map((r) => (r.body as { reason: string }).reason)).toEqual([
+      'incoherent_claim: ref',
+    ])
+  })
+
+  it('lo coherente se registra con ref, y se paga con ese id', async () => {
+    const { rechazos, hubClients } = await conUnReclamo(makeClaimResponse())
+    expect(rechazos).toEqual([])
+    const llamadas = (hubClients.walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls
+    const registro = llamadas.find(
+      (l) => (l[0] as { functionName: string }).functionName === 'registerIntent',
+    )
+    expect(registro).toBeDefined()
+    const [{ args }] = registro as [{ args: [{ ref: Hex }] }]
+    expect(args[0].ref).toBe(intentRef('pi_test'))
   })
 })
 
@@ -1602,16 +1758,13 @@ describe('un lote que no liquida nada no se envía, y lo saltado se clasifica (O
     ])
   })
 
-  it('el operador del registro en la lista negra: se rechaza, porque el registro no se puede cambiar', async () => {
+  it('el operador en la lista negra ya no es motivo: su comisión se acredita, no se le transfiere (ADR-009)', async () => {
     const r = await vuelta(
       cadena({ liquidaria: 0n, bloqueadas: [OPERATOR.toLowerCase()] }),
       claim('1'),
       claim('2'),
     )
-    expect(r.rechazos.map((c) => (c.body as { reason: string }).reason)).toEqual([
-      'usdc_blacklisted: operator',
-      'usdc_blacklisted: operator',
-    ])
+    expect(r.rechazos).toEqual([])
   })
 
   it('si una lectura falla, no se rechaza: ante la duda, se reintenta', async () => {

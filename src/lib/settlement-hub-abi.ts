@@ -9,7 +9,12 @@
 //     batch settled. The settlement state itself is the API's (it reads the
 //     event from the hub).
 //   - The registration errors, to name why a registration reverted.
-import { keccak256, toHex } from 'viem'
+//   - IntentRegistrationSkipped: which registrations of a batch the hub
+//     skipped, and why (ADR-009 §2).
+//   - intentIdOf: at startup, to check the hub computes the same id as the
+//     API (ADR-009 §3).
+//   - accrued / claim: the operator's fees, credited by the hub and claimed
+//     by this daemon (ADR-009 §1).
 
 export const SETTLEMENT_HUB_ABI = [
   // Solo existe en el hub de ADR-004. Sirve de comprobacion al arrancar: si el
@@ -39,7 +44,9 @@ export const SETTLEMENT_HUB_ABI = [
         name: 'reg',
         type: 'tuple',
         components: [
-          { name: 'intentId', type: 'bytes32' },
+          // Desde ADR-009 el registro lleva `ref` y el hub calcula el intentId
+          // con `intentIdOf(merchant, ref)`.
+          { name: 'ref', type: 'bytes32' },
           { name: 'merchant', type: 'address' },
           { name: 'operator', type: 'address' },
           { name: 'amount', type: 'uint256' },
@@ -48,7 +55,7 @@ export const SETTLEMENT_HUB_ABI = [
         ],
       },
     ],
-    outputs: [],
+    outputs: [{ name: 'intentId', type: 'bytes32' }],
     stateMutability: 'nonpayable',
   },
   {
@@ -79,7 +86,9 @@ export const SETTLEMENT_HUB_ABI = [
         name: 'regs',
         type: 'tuple[]',
         components: [
-          { name: 'intentId', type: 'bytes32' },
+          // Desde ADR-009 el registro lleva `ref` y el hub calcula el intentId
+          // con `intentIdOf(merchant, ref)`.
+          { name: 'ref', type: 'bytes32' },
           { name: 'merchant', type: 'address' },
           { name: 'operator', type: 'address' },
           { name: 'amount', type: 'uint256' },
@@ -141,6 +150,40 @@ export const SETTLEMENT_HUB_ABI = [
     ],
     anonymous: false,
   },
+  {
+    type: 'event',
+    name: 'IntentRegistrationSkipped',
+    inputs: [
+      { name: 'intentId', type: 'bytes32', indexed: true },
+      { name: 'reason', type: 'bytes', indexed: false },
+    ],
+    anonymous: false,
+  },
+  {
+    type: 'function',
+    name: 'intentIdOf',
+    inputs: [
+      { name: 'merchant', type: 'address' },
+      { name: 'ref', type: 'bytes32' },
+    ],
+    outputs: [{ name: '', type: 'bytes32' }],
+    stateMutability: 'pure',
+  },
+  {
+    type: 'function',
+    name: 'accrued',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'claim',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'nonpayable',
+  },
+  { type: 'error', name: 'NothingToClaim', inputs: [] },
   // Los errores con que `registerIntent` / `registerIntentBatch` pueden
   // revertir: con ellos en el ABI, viem da el nombre del motivo y el settler
   // distingue un registro que nunca pasará de un fallo de todos (OCT-01).
@@ -153,14 +196,6 @@ export const SETTLEMENT_HUB_ABI = [
   { type: 'error', name: 'BatchTooLarge', inputs: [] },
   { type: 'error', name: 'EnforcedPause', inputs: [] },
 ] as const
-
-/// Convert an off-chain intent id (e.g. `pi_abc123`) into the bytes32
-/// key used on-chain. SettlementHub.sol §84 documents this convention:
-///   "Keys are keccak256 of off-chain identifiers
-///    (e.g. the API's `pi_xxx` string converted to bytes32)."
-export function intentIdToBytes32(intentId: string): `0x${string}` {
-  return keccak256(toHex(intentId))
-}
 
 /// Sentinel value returned by getIntent for a never-registered key —
 /// the merchant address slot is zero. Daemon uses this to decide whether
