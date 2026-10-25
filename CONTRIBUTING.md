@@ -42,8 +42,8 @@ README, SECURITY, la licencia, `.env.example` y la configuración de CI.
 
 ## Dos cosas que conviene saber
 
-**El canal con el API va firmado (versión 2).** Cada llamada lleva
-`X-Operator-Channel: 2`, `X-Operator-Timestamp`, `X-Operator-Nonce` y
+**El canal con el API va firmado (versión 3).** Cada llamada lleva
+`X-Operator-Channel: 3`, `X-Operator-Timestamp`, `X-Operator-Nonce` y
 `X-Operator-Signature`, una firma con la llave del operador sobre el canal, la
 hora, el nonce, el método, la ruta y el SHA-256 del cuerpo, un campo por línea
 (`mensajeDelCanal` en `lib/internal-api-client.ts`). El API **recupera la
