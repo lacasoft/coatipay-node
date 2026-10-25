@@ -2,7 +2,7 @@
 
 El programa que liquida pagos en la red CoatiPay. Recibe autorizaciones
 **ERC-3009** firmadas por los pagadores, las presenta on-chain pagando el gas, y
-cobra el **1.05% de cada pago que liquida**, en USDC.
+gana el **1.05% de cada pago que liquida**, en USDC.
 
 **Apache-2.0** · cualquiera puede correrlo · sin whitelist.
 
@@ -17,7 +17,7 @@ API recupera tu dirección de esa firma y la comprueba contra `NodeRegistry`.
 ```
 tu daemon                          el API
     │  firma con NODE_OPERATOR_PRIVATE_KEY:
-    │  canal (v2), hora, nonce de un solo uso,
+    │  canal (v3), hora, nonce de un solo uso,
     │  método, ruta y hash del cuerpo
     ├──────────────────────────────────▶
     │                                  ¿habla su versión del canal?
@@ -99,7 +99,7 @@ El campo `api` dice si el API te deja trabajar:
 | `api` | Qué significa |
 |---|---|
 | `ok` | El API acepta tus llamadas |
-| `rejected` | Te responde 403: no estás registrado y activo, tu stake no alcanza el mínimo, tu dirección está en la lista negra de USDC (ningún pago que registres se podría cobrar), o la hora de tu máquina va desfasada |
+| `rejected` | Te responde 403: no estás registrado y activo, tu stake no alcanza el mínimo, tu dirección está en la lista negra de USDC (la plataforma no reparte trabajo a una dirección que el emisor bloqueó), o la hora de tu máquina va desfasada |
 | `incompatible` | El API habla otra versión del canal que tu daemon. El log dice cuál habla cada uno; lo habitual es actualizar la imagen |
 | `down` | No responde |
 
@@ -116,7 +116,13 @@ responde, espera y lo vuelve a intentar.
 ## Cuánto ganas, y qué arriesgas
 
 De cada pago que liquidas te llevas el **1.05%** (el 70% de la comisión del
-protocolo, que es del 1.5%). En USDC y on-chain, en la misma transacción.
+protocolo, que es del 1.5%), en USDC. El hub te lo **acredita** en la misma
+transacción del pago
+([ADR-009](https://github.com/lacasoft/coatipay-protocol/blob/master/audits/adr/009-una-parte-que-falla-no-detiene-a-las-demas.md)),
+y el daemon lo cobra solo con `claim()` cuando lo acumulado pasa de
+`FEE_CLAIM_MIN_AMOUNT` (1 USDC por defecto). También puedes cobrarlo a mano,
+`cast send $SETTLEMENT_HUB_ADDRESS "claim()"`: funciona incluso con el hub en
+pausa, y solo puede salir hacia tu dirección.
 
 Pagas el **gas** de cada liquidación. Por eso el daemon **rechaza pagos
 demasiado pequeños**: liquidar por debajo del coste sería perder dinero. Ese
@@ -124,8 +130,10 @@ umbral se escala solo con el gas en vivo (ver `MIN_PAYMENT_AMOUNT`).
 
 Tu **stake es tu credencial**: te da entrada al registro y es lo que impide que
 alguien levante mil nodos sin coste. **Nadie puede confiscarlo** —ni siquiera el
-guardian— y lo recuperas con un retiro que tarda 7 días. Si lo retiras por
-debajo del mínimo, **el API deja de darte trabajo** aunque sigas registrado.
+guardian— y lo recuperas con un retiro que tarda 7 días, también con los
+contratos en pausa. Si lo retiras por debajo del mínimo, **el API deja de darte
+trabajo** aunque sigas registrado. El mínimo no cambia por sorpresa: el guardian
+solo puede cambiarlo con 7 días de aviso on-chain.
 
 ---
 
@@ -135,6 +143,7 @@ debajo del mínimo, **el API deja de darte trabajo** aunque sigas registrado.
 |---|---|
 | **Preflight** | Al arrancar comprueba, contra la cadena, que cada RPC sirve la red de `CHAIN`, que el hub configurado es un SettlementHub de esa red con su USDC, y que tu operador está activo en el registro. Si no, no arranca, y dice por qué |
 | **Settler** | Toma autorizaciones de la cola y las liquida on-chain. Si el pagador usa un Coinbase Smart Wallet aún sin desplegar, lo despliega primero, y **solo** llama a `createAccount` en las fábricas de Coinbase: cualquier otra llamada que venga en la firma se rechaza sin enviar nada |
+| **Cobro de la comisión** | Cada hora mira cuánto te ha acreditado el hub y, si pasa de `FEE_CLAIM_MIN_AMOUNT`, lo cobra con `claim()` |
 | **Health** | Expone `/health` con el estado de cada subsistema: gas, RPC, settler y si el API te acepta |
 
 El nodo **no vigila eventos ni informa de qué se pagó**: eso lo lee la API
@@ -146,7 +155,7 @@ Lo único que el nodo sí le cuenta a la API, al enviar cada transacción de pag
 es **su hash y qué autorizaciones paga** (`POST /v1/internal/authorizations/broadcast`).
 Sirve solo para medir cuánto tarda un pago (autorización → envío → final):
 la API anota su propia hora, no cambia el estado de nada, y solo acepta el aviso
-de quien reclamó esas autorizaciones. El nodo no lo espera ni lo reintenta: si
+de quien tomó esas autorizaciones. El nodo no lo espera ni lo reintenta: si
 se pierde, la liquidación sigue igual.
 
 Varios nodeits pueden trabajar a la vez: la cola usa `FOR UPDATE SKIP LOCKED`,
