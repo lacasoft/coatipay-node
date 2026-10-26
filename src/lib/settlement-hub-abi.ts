@@ -15,6 +15,8 @@
 //     API (ADR-009 §3).
 //   - accrued / claim: the operator's fees, credited by the hub and claimed
 //     by this daemon (ADR-009 §1).
+//   - treasury / claimFor: the treasury's fees, claimed on its behalf when
+//     TREASURY_CLAIM_MIN_AMOUNT is set (the money can only go to the treasury).
 
 export const SETTLEMENT_HUB_ABI = [
   // Solo existe en el hub de ADR-004. Sirve de comprobacion al arrancar: si el
@@ -182,6 +184,20 @@ export const SETTLEMENT_HUB_ABI = [
     inputs: [],
     outputs: [{ name: '', type: 'uint256' }],
     stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'claimFor',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'treasury',
+    inputs: [],
+    outputs: [{ name: '', type: 'address' }],
+    stateMutability: 'view',
   },
   { type: 'error', name: 'NothingToClaim', inputs: [] },
   // Los errores con que `registerIntent` / `registerIntentBatch` pueden

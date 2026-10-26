@@ -112,6 +112,30 @@ describe('loadConfig — el USDC sale de la red', () => {
   })
 })
 
+describe('loadConfig — el cobro de la comisión de la tesorería (ADR-009)', () => {
+  it('apagado si TREASURY_CLAIM_MIN_AMOUNT no está o está vacía', () => {
+    expect(loadConfig(produccion()).treasuryClaimMinAmount).toBeUndefined()
+    expect(
+      loadConfig(produccion({ TREASURY_CLAIM_MIN_AMOUNT: '' })).treasuryClaimMinAmount,
+    ).toBeUndefined()
+  })
+
+  it('con un umbral en unidades de USDC, encendido', () => {
+    expect(
+      loadConfig(produccion({ TREASURY_CLAIM_MIN_AMOUNT: '1000000' })).treasuryClaimMinAmount,
+    ).toBe(1_000_000)
+  })
+
+  it('cero o un valor que no es un número no arranca, y lo dice con su variable', () => {
+    expect(() => loadConfig(produccion({ TREASURY_CLAIM_MIN_AMOUNT: '0' }))).toThrow(
+      /TREASURY_CLAIM_MIN_AMOUNT/,
+    )
+    expect(() => loadConfig(produccion({ TREASURY_CLAIM_MIN_AMOUNT: 'mucho' }))).toThrow(
+      /TREASURY_CLAIM_MIN_AMOUNT/,
+    )
+  })
+})
+
 describe('loadConfig — los errores nombran la variable de entorno', () => {
   it('sin CHAIN, dice qué valores admite', () => {
     expect(() => loadConfig(produccion({ CHAIN: undefined }))).toThrow(
