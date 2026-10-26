@@ -143,7 +143,7 @@ solo puede cambiarlo con 7 días de aviso on-chain.
 |---|---|
 | **Preflight** | Al arrancar comprueba, contra la cadena, que cada RPC sirve la red de `CHAIN`, que el hub configurado es un SettlementHub de esa red con su USDC, y que tu operador está activo en el registro. Si no, no arranca, y dice por qué |
 | **Settler** | Toma autorizaciones de la cola y las liquida on-chain. Si el pagador usa un Coinbase Smart Wallet aún sin desplegar, lo despliega primero, y **solo** llama a `createAccount` en las fábricas de Coinbase: cualquier otra llamada que venga en la firma se rechaza sin enviar nada |
-| **Cobro de la comisión** | Cada hora mira cuánto te ha acreditado el hub y, si pasa de `FEE_CLAIM_MIN_AMOUNT`, lo cobra con `claim()` |
+| **Cobro de la comisión** | Cada hora mira cuánto te ha acreditado el hub y, si pasa de `FEE_CLAIM_MIN_AMOUNT`, lo cobra con `claim()`. Si defines `TREASURY_CLAIM_MIN_AMOUNT` (opcional, apagado por defecto), lleva también a la tesorería su comisión con `claimFor`: el dinero solo puede ir a la tesorería, y el gas lo pagas tú |
 | **Health** | Expone `/health` con el estado de cada subsistema: gas, RPC, settler y si el API te acepta |
 
 El nodo **no vigila eventos ni informa de qué se pagó**: eso lo lee la API
