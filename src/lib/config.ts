@@ -65,6 +65,12 @@ const ConfigSchema = z
     /// transferirla (ADR-009 §1); cobrarla cuesta una transacción (~60k de gas),
     /// así que se junta antes. FEE_CLAIM_MIN_AMOUNT; 1 USDC por defecto.
     feeClaimMinAmount: z.coerce.number().int().positive().default(1_000_000),
+    /// Desde cuánto cobra también la comisión de la TESORERÍA, con
+    /// `claimFor(tesorería)` (ADR-009 §1). El dinero solo puede ir a la
+    /// tesorería, pero el gas lo paga este nodo: por eso está apagado si no se
+    /// define. Es para el nodeit del equipo, no para los de la comunidad.
+    /// TREASURY_CLAIM_MIN_AMOUNT, en unidades de USDC.
+    treasuryClaimMinAmount: z.coerce.number().int().positive().optional(),
     /// A held (currently-unprofitable) authorization this close to its
     /// `validBefore` is rejected as uneconomical instead of retried — it won't
     /// become profitable before it expires. Seconds. SETTLE_EXPIRY_BUFFER_SECONDS.
@@ -176,6 +182,7 @@ const VARIABLES: Record<keyof z.input<typeof ConfigSchema>, string> = {
   minPaymentAmount: 'MIN_PAYMENT_AMOUNT',
   gasPriceRefGwei: 'GAS_PRICE_REF_GWEI',
   feeClaimMinAmount: 'FEE_CLAIM_MIN_AMOUNT',
+  treasuryClaimMinAmount: 'TREASURY_CLAIM_MIN_AMOUNT',
   settleExpiryBufferSeconds: 'SETTLE_EXPIRY_BUFFER_SECONDS',
 }
 
@@ -202,6 +209,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     minPaymentAmount: env.MIN_PAYMENT_AMOUNT,
     gasPriceRefGwei: env.GAS_PRICE_REF_GWEI,
     feeClaimMinAmount: env.FEE_CLAIM_MIN_AMOUNT,
+    // Vacía cuenta como no definida: no se cobra la de la tesorería.
+    treasuryClaimMinAmount: env.TREASURY_CLAIM_MIN_AMOUNT || undefined,
     settleExpiryBufferSeconds: env.SETTLE_EXPIRY_BUFFER_SECONDS,
   })
   if (!resultado.success) {
